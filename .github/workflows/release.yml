@@ -15,10 +15,10 @@ jobs:
 
       - name: Install dependencies
         run: |
-          # GitHub runner images ship a Google Chrome apt repo that
-          # intermittently serves broken indexes; it is not needed here.
-          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
-          sudo apt-get update
+          # GitHub runner images ship Google Chrome apt sources that
+          # intermittently serve broken indexes; they are not needed here.
+          sudo find /etc/apt -iname '*google*' -delete
+          sudo apt-get update || echo "apt update incomplete; using cached indexes"
           sudo apt-get install -y cmake g++ libssl-dev
 
       - name: Build
