@@ -113,6 +113,18 @@
       }
     ]
   },
+  "wu-ftpd": {
+    "product": "Wu-FTPD",
+    "aliases": ["wu-ftpd", "wu-ftpd server"],
+    "vulns": [
+      {
+        "cve": "CVE-2003-0466",
+        "affected": "<2.6.2",
+        "cvss": 10.0,
+        "summary": "Off-by-one buffer overflow in fb_realpath gives remote root code execution"
+      }
+    ]
+  },
   "apache": {
     "product": "Apache httpd",
     "aliases": ["apache", "apache httpd"],
@@ -184,6 +196,12 @@
         "summary": "HTTP/2 Data Dribble denial of service"
       },
       {
+        "cve": "CVE-2017-7529",
+        "affected": "<1.13.3",
+        "cvss": 7.5,
+        "summary": "Integer overflow in the HTTP range filter leaks cached response headers and upstream responses"
+      },
+      {
         "cve": "CVE-2013-2028",
         "affected": ">=1.3.9 <=1.4.0",
         "cvss": 9.8,
@@ -224,6 +242,24 @@
         "affected": "<3.8.5",
         "cvss": 9.8,
         "summary": "SMTP smuggling: message smuggling via specially crafted BDAT/STARTTLS sequences"
+      }
+    ]
+  },
+  "sendmail": {
+    "product": "Sendmail",
+    "aliases": ["sendmail"],
+    "vulns": [
+      {
+        "cve": "CVE-2003-0161",
+        "affected": "<8.12.9",
+        "cvss": 10.0,
+        "summary": "Pre-authentication heap overflow in address parsing gives remote root code execution"
+      },
+      {
+        "cve": "CVE-2002-1335",
+        "affected": "<8.12.7",
+        "cvss": 7.5,
+        "summary": "Buffer overflow via crafted message headers allows remote code execution"
       }
     ]
   },
@@ -401,9 +437,9 @@
       },
       {
         "cve": "CVE-2015-8080",
-        "summary": "Integer overflow in the LUANUMBER parsing leads to memory corruption",
         "affected": "<3.0.6",
-        "cvss": 5.0
+        "cvss": 5.0,
+        "summary": "Integer overflow in the LUANUMBER parsing leads to memory corruption"
       },
       {
         "cve": "CVE-2021-32675",
@@ -491,24 +527,6 @@
       }
     ]
   },
-  "sendmail": {
-    "product": "Sendmail",
-    "aliases": ["sendmail"],
-    "vulns": [
-      {
-        "cve": "CVE-2003-0161",
-        "affected": "<8.12.9",
-        "cvss": 10.0,
-        "summary": "Pre-authentication heap overflow in address parsing gives remote root code execution"
-      },
-      {
-        "cve": "CVE-2002-1335",
-        "affected": "<8.12.7",
-        "cvss": 7.5,
-        "summary": "Buffer overflow via crafted message headers allows remote code execution"
-      }
-    ]
-  },
   "pure-ftpd": {
     "product": "Pure-FTPD",
     "aliases": ["pure-ftpd", "pureftpd"],
@@ -560,6 +578,180 @@
         "affected": ">=3.2.8 <=3.2.8.1",
         "cvss": 10.0,
         "summary": "Trojaned 3.2.8.1 distribution contains a backdoor triggered by an AB command allowing remote code execution as the IRCd user"
+      }
+    ]
+  },
+  "php": {
+    "product": "PHP",
+    "aliases": ["php", "x-powered-by: php"],
+    "vulns": [
+      {
+        "cve": "CVE-2019-11043",
+        "affected": ">=7.2 <7.2.26",
+        "cvss": 9.8,
+        "summary": "PHP-FPM under nginx: path_info miscalculation allows unauthenticated remote code execution"
+      },
+      {
+        "cve": "CVE-2019-11043",
+        "affected": ">=7.3 <7.3.13",
+        "cvss": 9.8,
+        "summary": "PHP-FPM under nginx: path_info miscalculation allows unauthenticated remote code execution"
+      },
+      {
+        "cve": "CVE-2012-1823",
+        "affected": ">=5.3 <5.3.12",
+        "cvss": 7.5,
+        "summary": "php-cgi accepts command line switches from the query string, leading to source disclosure and code execution"
+      },
+      {
+        "cve": "CVE-2012-1823",
+        "affected": ">=5.4 <5.4.2",
+        "cvss": 7.5,
+        "summary": "php-cgi accepts command line switches from the query string, leading to source disclosure and code execution"
+      },
+      {
+        "cve": "CVE-2015-6835",
+        "affected": ">=5.4 <5.4.44",
+        "cvss": 7.5,
+        "summary": "Session deserialization vulnerability allows use-after-free code execution"
+      }
+    ]
+  },
+  "wordpress": {
+    "product": "WordPress",
+    "aliases": ["wordpress"],
+    "vulns": [
+      {
+        "cve": "CVE-2022-21661",
+        "affected": "<5.8.3",
+        "cvss": 9.8,
+        "summary": "WP_Query SQL injection allows authenticated users (and plugins) to inject arbitrary SQL"
+      },
+      {
+        "cve": "CVE-2019-8942",
+        "affected": "<5.0.1",
+        "cvss": 8.8,
+        "summary": "Path traversal in attachment metadata allows remote code execution via crafted image upload"
+      },
+      {
+        "cve": "CVE-2017-5487",
+        "affected": "<4.7.1",
+        "cvss": 5.3,
+        "summary": "REST API discloses post author usernames without authentication"
+      }
+    ]
+  },
+  "jenkins": {
+    "product": "Jenkins",
+    "aliases": ["jenkins"],
+    "vulns": [
+      {
+        "cve": "CVE-2024-23897",
+        "affected": "<2.442",
+        "cvss": 9.8,
+        "summary": "CLI argument expansion gives unauthenticated arbitrary file read and often remote code execution"
+      },
+      {
+        "cve": "CVE-2018-1000861",
+        "affected": "<2.153",
+        "cvss": 9.8,
+        "summary": "Stapler request handling allows deserialization-driven remote code execution via crafted views"
+      },
+      {
+        "cve": "CVE-2019-1003000",
+        "affected": "<2.176",
+        "cvss": 8.8,
+        "summary": "Script security sandbox bypass allows authenticated users to execute arbitrary code"
+      },
+      {
+        "cve": "CVE-2015-8103",
+        "affected": "<1.650",
+        "cvss": 10.0,
+        "summary": "Java deserialization in the remoting channel gives unauthenticated remote code execution"
+      }
+    ]
+  },
+  "grafana": {
+    "product": "Grafana",
+    "aliases": ["grafana"],
+    "vulns": [
+      {
+        "cve": "CVE-2021-43798",
+        "affected": "<8.3.1",
+        "cvss": 7.5,
+        "summary": "Path traversal in /public/plugins/<plugin>/../.. serves arbitrary files, including the SQLite database with secrets"
+      },
+      {
+        "cve": "CVE-2020-13379",
+        "affected": ">=7.0 <7.0.4",
+        "cvss": 7.5,
+        "summary": "Unauthenticated /avatar/%snapshot% SSRF leaks internal services"
+      }
+    ]
+  },
+  "elasticsearch": {
+    "product": "Elasticsearch",
+    "aliases": ["elasticsearch"],
+    "vulns": [
+      {
+        "cve": "CVE-2015-1427",
+        "affected": ">=1.3 <1.4.3",
+        "cvss": 9.8,
+        "summary": "Groovy dynamic scripting allows unauthenticated remote code execution via search queries"
+      },
+      {
+        "cve": "CVE-2015-5531",
+        "affected": "<1.6.1",
+        "cvss": 7.5,
+        "summary": "Path traversal in the snapshot restore API reads arbitrary files from the server"
+      }
+    ]
+  },
+  "couchdb": {
+    "product": "CouchDB",
+    "aliases": ["couchdb", "apache couchdb"],
+    "vulns": [
+      {
+        "cve": "CVE-2017-12635",
+        "affected": ">=1.0 <2.1.1",
+        "cvss": 9.8,
+        "summary": "Erlang/JSON duplicate-key handling creates an admin user without authentication"
+      },
+      {
+        "cve": "CVE-2017-12636",
+        "affected": ">=1.0 <2.1.1",
+        "cvss": 9.8,
+        "summary": "Query server config manipulation leads to remote code execution as the couchdb user"
+      }
+    ]
+  },
+  "webmin": {
+    "product": "Webmin",
+    "aliases": ["webmin", "miniserv"],
+    "vulns": [
+      {
+        "cve": "CVE-2019-15107",
+        "affected": "<1.920",
+        "cvss": 10.0,
+        "summary": "password_change.cgi command injection gives unauthenticated remote code execution as root"
+      },
+      {
+        "cve": "CVE-2020-12662",
+        "affected": "<1.950",
+        "cvss": 7.5,
+        "summary": "Multiple cross-site scripting flaws in the web interface"
+      }
+    ]
+  },
+  "lighttpd": {
+    "product": "lighttpd",
+    "aliases": ["lighttpd", "lighty"],
+    "vulns": [
+      {
+        "cve": "CVE-2018-19052",
+        "affected": "<1.4.50",
+        "cvss": 7.5,
+        "summary": "url_decode mishandling in mod_extforward / proxy leads to request smuggling and access-control bypass"
       }
     ]
   }

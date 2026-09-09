@@ -36,6 +36,18 @@
         },
         {
           "service": "ftp",
+          "regex": "^220[ -].*wu-2\\.([\\d.]+)",
+          "product": "Wu-FTPD",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "^MiniServ/([\\d.]+)",
+          "product": "Webmin",
+          "version_group": 1
+        },
+        {
+          "service": "ftp",
           "regex": "^220[ -].*Pure-?[Ff][Tt][Pp][Dd]",
           "product": "Pure-FTPD"
         },
@@ -130,16 +142,61 @@
         },
         {
           "service": "http",
+          "regex": "X-Jenkins:\\s*([\\d.]+)",
+          "product": "Jenkins",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "<meta name=\"generator\" content=\"WordPress ([\\d.]+)\"",
+          "product": "WordPress",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "wp-content",
+          "product": "WordPress"
+        },
+        {
+          "service": "http",
+          "regex": "Grafana\\s+v?([\\d]+\\.[\\d.]+)|\"buildInfo\".*\"version\":\"([\\d.]+)\"",
+          "product": "Grafana"
+        },
+        {
+          "service": "http",
+          "regex": "\"cluster_name\"|\"tagline\" : \"You Know, for Search\"",
+          "product": "Elasticsearch"
+        },
+        {
+          "service": "http",
+          "regex": "CouchDB/([\\d.]+)",
+          "product": "CouchDB",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "Server:\\s*lighttpd/([\\d.]+)",
+          "product": "lighttpd",
+          "version_group": 1
+        },
+        {
+          "service": "http",
           "regex": "^HTTP/\\d\\.\\d\\s+\\d{3}",
           "product": "HTTP server"
         }
       ]
     },
     {
-      "name": "redis-ping",
-      "payload": "PING\r\n",
+      "name": "redis-info",
+      "payload": "INFO server\r\n",
       "wait_ms": 1000,
       "matches": [
+        {
+          "service": "redis",
+          "regex": "redis_version:([\\d.]+)",
+          "product": "Redis",
+          "version_group": 1
+        },
         {
           "service": "redis",
           "regex": "^\\+PONG|^-ERR unknown command",
@@ -171,7 +228,7 @@
       "matches": [
         {
           "service": "mongodb",
-          "regex": "maxBsonObjectSize|ismaster",
+          "regex": "(ismaster.*maxBsonObjectSize|maxBsonObjectSize.*ismaster)",
           "product": "MongoDB"
         }
       ]

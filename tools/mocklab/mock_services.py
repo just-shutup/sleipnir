@@ -11,14 +11,20 @@ Every listener emulates a real service badly enough to trip the scanner:
   127.0.0.1:8443  HTTPS      same Apache 2.4.49 web app over TLS with a
                              self-signed, almost-expired certificate whose
                              CN (mock.lab) does not match the scan target
-  127.0.0.1:2501  SMTP       Postfix banner, accepts any RCPT (open relay)
-  127.0.0.1:2502  SMTP       Postfix banner, rejects relaying (no finding)
+  127.0.0.1:8081  WordPress  WordPress 5.8.1 on PHP 7.2.24 behind nginx
+                             1.18.0, REST user enumeration, CORS reflection
+  127.0.0.1:6380  Redis      unauthenticated Redis 6.0.16   -> CVE-2022-0543
+  127.0.0.1:2375  Docker     Docker Engine API without TLS/auth (root-equivalent)
+  127.0.0.1:2501  SMTP       Postfix banner, accepts any RCPT (open relay),
+                             VRFY confirms mailboxes (enumeration)
+  127.0.0.1:2502  SMTP       Postfix banner, relay closed, VRFY disabled
+                             (negative test: no findings)
   127.0.0.1:2503  CRASHY     echo service that DIES on a >1024-byte payload
                              (demonstrates the robustness module finding a crash)
 
 Usage:  python3 tools/mocklab/mock_services.py
 Then:   ./build/apps/sleipnir/sleipnir scan 127.0.0.1 \
-            -p 2101,2102,2201,2501,2502,2503,8080,8443
+            -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8443
 """
 
 import socket
@@ -104,6 +110,7 @@ class SmtpRelayHandler(BannerHandler):
     BANNER = b"220 mail.lab ESMTP Postfix (Ubuntu)\r\n"
 
     RCPT_REPLY = b"250 OK\r\n"  # accepts anything -> open relay
+    VRFY_REPLY = b"252 2.0.0 root\r\n"  # VRFY confirms mailbox -> enumeration
 
     def handle(self):
         self.request.sendall(self.BANNER)
@@ -118,17 +125,19 @@ class SmtpRelayHandler(BannerHandler):
                     b"EHLO": b"250-mail.lab\r\n250 OK\r\n",
                     b"MAIL": b"250 OK\r\n",
                     b"RCPT": self.RCPT_REPLY,
+                    b"VRFY": self.VRFY_REPLY,
                     b"QUIT": b"221 Bye\r\n",
                 }
                 self.request.sendall(replies.get(cmd, b"502 Command not implemented\r\n"))
                 if cmd == b"QUIT":
                     break
-            except OSError:
+            except (OSError, IndexError):
                 break
 
 
 class SmtpStrictHandler(SmtpRelayHandler):
     RCPT_REPLY = b"554 Relay access denied\r\n"
+    VRFY_REPLY = b"502 5.5.1 VRFY command is disabled\r\n"
 
 
 class CrashedServer(Exception):
@@ -205,6 +214,125 @@ class LabHTTPRequestHandler(BaseHTTPRequestHandler):
         pass
 
 
+class RedisLabHandler(socketserver.StreamRequestHandler):
+    """Minimal RESP implementation: an unauthenticated Redis 6.0.16 whose
+    INFO replies with the version (CVE-2022-0543 territory)."""
+
+    INFO_BODY = (
+        b"# Server\r\nredis_version:6.0.16\r\nredis_mode:standalone\r\n"
+        b"os:Linux 5.4.0 x86_64\r\nrun_id:mocklab\r\ntcp_port:6380\r\n"
+        b"uptime_in_seconds:42\r\n"
+    )
+
+    def handle(self):
+        try:
+            self.request.settimeout(2)
+            while True:
+                data = self.request.recv(4096)
+                if not data:
+                    break
+                cmd = data.split(b"\r\n")[0].strip().upper()
+                if cmd.startswith(b"PING"):
+                    self.request.sendall(b"+PONG\r\n")
+                elif cmd.startswith(b"INFO"):
+                    body = self.INFO_BODY
+                    self.request.sendall(
+                        b"$" + str(len(body)).encode() + b"\r\n" + body + b"\r\n"
+                    )
+                elif cmd.startswith(b"QUIT"):
+                    self.request.sendall(b"+OK\r\n")
+                    break
+                else:
+                    self.request.sendall(
+                        b"-ERR unknown command '" + cmd + b"'\r\n"
+                    )
+        except OSError:
+            pass
+
+
+class DockerApiHandler(BaseHTTPRequestHandler):
+    """Docker Engine API on plain HTTP without TLS or auth: the root-equivalent
+    access the docker_api_unauth plugin should report."""
+
+    server_version = "Docker/20.10.12 (linux)"
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/version":
+            body = (
+                b'{"Platform":{"Name":"Docker Engine - Community"},'
+                b'"Version":"20.10.12","ApiVersion":"1.41","Os":"linux",'
+                b'"Arch":"amd64","KernelVersion":"5.4.0"}'
+            )
+            self._send(200, body, "application/json")
+        elif path == "/containers/json":
+            body = (
+                b'[{"Id":"a1b2c3","Names":[{"Name":"/web"}],'
+                b'"Image":"nginx:1.21","Status":"Up 3 days"}]'
+            )
+            self._send(200, body, "application/json")
+        else:
+            self._send(404, b'{"message":"page not found"}', "application/json")
+
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class WordPressHandler(BaseHTTPRequestHandler):
+    """A WordPress 5.8.1 on PHP 7.2.24 behind nginx 1.18.0: every component
+    has a known CVE, and the REST API leaks user logins."""
+
+    server_version = "nginx/1.18.0"
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/":
+            body = (
+                b"<!DOCTYPE html><html><head>"
+                b'<meta name="generator" content="WordPress 5.8.1" />'
+                b"<title>Mock WP</title></head><body>"
+                b'<link rel="stylesheet" href="/wp-content/themes/mock/style.css">'
+                b"<p>Welcome to the mock WordPress site.</p></body></html>"
+            )
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("X-Powered-By", "PHP/7.2.24")
+            # deliberately reflects any Origin (CORS misconfiguration)
+            origin = self.headers.get("Origin")
+            if origin:
+                self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        elif path == "/wp-json/wp/v2/users":
+            body = (
+                b'[{"id":1,"name":"admin","slug":"admin"},'
+                b'{"id":2,"name":"Editor","slug":"editor"},'
+                b'{"id":3,"name":"dev","slug":"dev"}]'
+            )
+            self._send(200, body)
+        else:
+            self._send(404, b"Not Found")
+
+    def _send(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-Powered-By", "PHP/7.2.24")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
 SERVICES = [
     ("ssh", 2201, SshHandler),
     ("ftp-vuln", 2101, FtpHandler),
@@ -214,6 +342,9 @@ SERVICES = [
     ("smtp-relay", 2501, SmtpRelayHandler),
     ("smtp-strict", 2502, SmtpStrictHandler),
     ("crashy-echo", 2503, EchoCrashHandler, CrashyTCPServer),
+    ("redis", 6380, RedisLabHandler),
+    ("docker-api", 2375, DockerApiHandler, LabHTTPServer),
+    ("wordpress", 8081, WordPressHandler, LabHTTPServer),
 ]
 
 
@@ -238,13 +369,16 @@ def ensure_tls_cert():
 
 
 def main():
+    # generate the TLS certificate before any listener starts, so a scan
+    # launched right after the lab never races the cert generation
+    cert, key = ensure_tls_cert()
+
     servers = []
     for entry in SERVICES:
         name, port, handler = entry[0], entry[1], entry[2]
         server_cls = entry[3] if len(entry) > 3 else socketserver.ThreadingTCPServer
         srv = server_cls((HOST, port), handler)
         if name == "https":
-            cert, key = ensure_tls_cert()
             ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             ctx.load_cert_chain(cert, key)
             srv.socket = ctx.wrap_socket(srv.socket, server_side=True)

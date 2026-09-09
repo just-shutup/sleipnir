@@ -149,10 +149,9 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
 
                 auto root = check_root_response(job.host, job.port, *resp);
                 for (auto& f : root.findings) collector_.add_finding(std::move(f));
-                if (!root.server_product.empty()) {
-                    for (auto& f : cves_.match(job.host, job.port,
-                                               root.server_product,
-                                               root.server_version))
+                for (const auto& [product, version] : root.tech_stack) {
+                    for (auto& f : cves_.match(job.host, job.port, product,
+                                               version))
                         collector_.add_finding(std::move(f));
                 }
 
@@ -188,10 +187,9 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
 
             auto root = check_root_response(job.host, job.port, *resp);
             for (auto& f : root.findings) collector_.add_finding(std::move(f));
-            if (!root.server_product.empty()) {
-                for (auto& f : cves_.match(job.host, job.port,
-                                           root.server_product,
-                                           root.server_version))
+            for (const auto& [product, version] : root.tech_stack) {
+                for (auto& f :
+                     cves_.match(job.host, job.port, product, version))
                     collector_.add_finding(std::move(f));
             }
 

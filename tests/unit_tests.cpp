@@ -164,6 +164,36 @@ TEST_CASE("check_root_response flags misconfigurations") {
     CHECK(out2.server_version.empty());
 }
 
+TEST_CASE("tech stack collects Server and X-Powered-By products") {
+    HttpResponse resp;
+    resp.status = 200;
+    resp.headers["server"] = "nginx/1.18.0";
+    resp.headers["x-powered-by"] = "PHP/7.2.24";
+
+    auto out = check_root_response("h", 80, resp);
+    // nginx + PHP: both go through CVE matching
+    REQUIRE(out.tech_stack.size() == 2);
+    CHECK(out.tech_stack[0].first == "nginx");
+    CHECK(out.tech_stack[0].second == "1.18.0");
+    CHECK(out.tech_stack[1].first == "PHP");
+    CHECK(out.tech_stack[1].second == "7.2.24");
+    CHECK(out.server_product == "nginx"); // Server header wins for display
+
+    bool has_xpb = false;
+    for (const auto& f : out.findings)
+        if (f.title == "Backend technology disclosed via X-Powered-By")
+            has_xpb = true;
+    CHECK(has_xpb);
+
+    // no Server header: X-Powered-By product is used for display too
+    HttpResponse resp2;
+    resp2.status = 200;
+    resp2.headers["x-powered-by"] = "PHP/8.1.0";
+    auto out2 = check_root_response("h", 80, resp2);
+    CHECK(out2.server_product == "PHP");
+    CHECK(out2.server_version == "8.1.0");
+}
+
 TEST_CASE("http response header keys are lowercased for lookup") {
     HttpResponse resp;
     resp.headers["Content-Type"] = "text/html"; // simulate raw insertion

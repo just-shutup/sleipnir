@@ -56,7 +56,7 @@ sleipnir> exit
 
 # Сканирование только своих лабораторных сервисов (мок-лаба в комплекте)
 python3 tools/mocklab/mock_services.py &
-./sleipnir scan 127.0.0.1 -p 2101,2102,2201,2501,2502,2503,8080,8443
+./sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8443
 ```
 
 ### Указание каталога плагинов
@@ -95,10 +95,10 @@ Sleipnir — инструмент аудита, разработанный в у
 <tr><th>Модуль</th><th>Что делает</th></tr>
 <tr><td><b>Разведка</b></td><td>IP-литералы, CIDR (<code>10.0.0.0/24</code>), DNS-имена, URL-ввод; порты <code>top100</code>, списки и диапазоны; пул из 32 воркеров, все операции с таймаутами</td></tr>
 <tr><td><b>Fingerprinting</b></td><td>Декларативная таблица проб в духе nmap: NULL-проба + активные пробы (HTTP, Redis, PostgreSQL, MongoDB, IRC) и бинарные протоколы (MySQL, VNC, telnet); 12+ типов сервисов, извлечение продукта и версии</td></tr>
-<tr><td><b>CVE-матчинг</b></td><td>Локальная база: <b>22 продукта, 72 записи</b> (OpenSSH, vsftpd, Apache, nginx, OpenSSL, MySQL, PostgreSQL, Redis, Tomcat, Exchange…), constraint-язык версий (<code>&lt;9.8p1</code>, <code>&gt;=1.0 &lt;2.0</code>)</td></tr>
+<tr><td><b>CVE-матчинг</b></td><td>Локальная база: <b>31 продукт, 95 записей</b> (OpenSSH, vsftpd, Apache, nginx, OpenSSL, MySQL, PostgreSQL, Redis, Tomcat, PHP, WordPress, Jenkins, Grafana, Elasticsearch, CouchDB, Webmin, Exchange…), constraint-язык версий (<code>&lt;9.8p1</code>, <code>&gt;=1.0 &lt;2.0</code>); стек технологий собирается из <code>Server</code> и <code>X-Powered-By</code></td></tr>
 <tr><td><b>TLS-аудит</b></td><td>Хэндшейк на TLS-портах с SNI; сертификат: срок (+окно 14 дней), самоподписанность, доверие цепочке, соответствие имени; активный детект TLS 1.0/1.1/SSL 3.0</td></tr>
 <tr><td><b>HTTP-аудит</b></td><td>Раскрытие версии в <code>Server</code>, directory listing, security-заголовки (CSP, XCTO, XFO), пермиссивная CORS, cookie без Secure/HttpOnly/SameSite, чувствительные пути (<code>/.git</code>, <code>/.env</code>, <code>/.aws/credentials</code>, <code>/phpinfo.php</code>…), методы TRACE/OPTIONS</td></tr>
-<tr><td><b>Lua-плагины</b></td><td>Хуки <code>on_port_open</code>/<code>on_service</code>/<code>on_http_response</code>; API: TCP, HTTP, HTTPS, TLS-инспекция; каждый плагин — отдельный <code>lua_State</code> без <code>io</code>/<code>os.execute</code>/<code>require</code></td></tr>
+<tr><td><b>Lua-плагины</b></td><td>Хуки <code>on_port_open</code>/<code>on_service</code>/<code>on_http_response</code>; API: TCP, HTTP, HTTPS, TLS-инспекция; каждый плагин — отдельный <code>lua_State</code> без <code>io</code>/<code>os.execute</code>/<code>require</code>. В комплекте 10 проверок: неавторизованный Redis, открытый Docker API, SMTP VRFY, CORS-рефлексия, пользователи WordPress, security.txt, анонимный FTP, открытый relay, directory listing, админ-панели</td></tr>
 <tr><td><b>Robustness</b></td><td>Проверка устойчивости к некорректному вводу: детерминированный ограниченный корпус payload'ов, темповый контроль, верификация отказа переподключением; opt-in (<code>-f</code>)</td></tr>
 <tr><td><b>Отчётность</b></td><td>Цветная консоль, машиночитаемый JSON, самодостаточный HTML с распределением по критичности; <code>--fail-on SEVERITY</code> — код возврата 3 для CI/CD</td></tr>
 <tr><td><b>Оболочка</b></td><td>REPL с историей и персистентными настройками сессии; Ctrl+C прерывает скан, не выходя из оболочки</td></tr>
@@ -239,11 +239,11 @@ HTML-отчёт — самодостаточный документ с inline-CS
 
 ## Мок-лаборатория
 
-Восемь слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации:
+Одиннадцать слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации:
 
 ```bash
 python3 tools/mocklab/mock_services.py
-sleipnir scan 127.0.0.1 -p 2101,2102,2201,2501,2502,2503,8080,8443 -f --report report.html
+sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8443 -f --report report.html
 ```
 
 | Порт | Сервис | Что эмулирует | Ожидаемый результат |
@@ -251,10 +251,13 @@ sleipnir scan 127.0.0.1 -p 2101,2102,2201,2501,2502,2503,8080,8443 -f --report r
 | 2101 | FTP | vsftpd 2.3.4 | CVE-2011-2523 (critical) |
 | 2102 | FTP | vsftpd 3.0.2, анонимный вход | CVE-2015-1419 + плагин |
 | 2201 | SSH | OpenSSH 7.2p2 | CVE-2024-6387, CVE-2023-38408 и др. |
-| 2501 | SMTP | Postfix, открытый relay | плагин smtp_openrelay |
-| 2502 | SMTP | Postfix, relay закрыт | ничего — **негативный тест** |
+| 2375 | Docker API | Engine API без TLS/auth | плагин docker_api_unauth (critical) |
+| 2501 | SMTP | Postfix, открытый relay + VRFY | плагины smtp_openrelay, smtp_vrfy |
+| 2502 | SMTP | Postfix, relay закрыт, VRFY отключён | ничего — **негативный тест** |
 | 2503 | echo | отказ от payload > 1024 байт | robustness → critical |
+| 6380 | Redis | Redis 6.0.16 без аутентификации | CVE-2022-0543 + плагин (critical) |
 | 8080 | HTTP | Apache 2.4.49, dir listing, `/.git`, `/.env` | CVE-2021-41773 + builtin |
+| 8081 | WordPress | WP 5.8.1 / PHP 7.2.24 / nginx 1.18.0, REST-пользователи, CORS-рефлексия | CVE nginx + PHP + WordPress + 3 плагина |
 | 8443 | HTTPS | то же поверх TLS, самоподписанный сертификат (CN=mock.lab, 1 день) | CVE + TLS-находки |
 
 ---
@@ -292,4 +295,4 @@ sleipnir scan 127.0.0.1 -p 2101,2102,2201,2501,2502,2503,8080,8443 -f --report r
 
 ## Проект
 
-Sleipnir v0.3.0 — это самостоятельный проект по информационной безопасности: асинхронный сетевой движок на Asio, интеграция Lua (sol2), декларативные базы знаний с языком ограничений версий, TLS-инспекция на OpenSSL и методика самотестирования на воспроизводимом полигоне с негативными тестами.
+Sleipnir v0.4.0 — это самостоятельный проект по информационной безопасности: асинхронный сетевой движок на Asio, интеграция Lua (sol2), декларативные базы знаний с языком ограничений версий, TLS-инспекция на OpenSSL и методика самотестирования на воспроизводимом полигоне с негативными тестами.

@@ -73,6 +73,32 @@ HttpCheckResult check_root_response(const std::string& host, uint16_t port,
                     *server + "'. This simplifies targeted attacks.",
                 "Server: " + *server));
         }
+        if (!out.server_product.empty())
+            out.tech_stack.push_back({out.server_product, out.server_version});
+    }
+
+    // X-Powered-By: backend runtime (PHP/FastCGI) and its version. The value
+    // also feeds CVE matching via the tech stack.
+    if (const std::string* powered = resp.header("x-powered-by")) {
+        std::string product = *powered, version;
+        size_t slash = product.find('/');
+        if (slash != std::string::npos) {
+            version = product.substr(slash + 1);
+            size_t sp = version.find(' ');
+            version = (sp == std::string::npos) ? version : version.substr(0, sp);
+            product = product.substr(0, slash);
+        }
+        if (out.server_product.empty()) out.server_product = product;
+        if (out.server_version.empty()) out.server_version = version;
+        if (!product.empty() && !version.empty())
+            out.tech_stack.push_back({product, version});
+        out.findings.push_back(make_finding(
+            host, port, "Backend technology disclosed via X-Powered-By",
+            Severity::Info,
+            "The X-Powered-By header reveals the application runtime: '" +
+                *powered + "'. Combined with version-specific CVE knowledge "
+                "this narrows the attack surface selection.",
+            "X-Powered-By: " + *powered));
     }
 
     if (looks_like_directory_listing(resp.body)) {

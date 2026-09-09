@@ -11,6 +11,7 @@
 #include "sleipnir/results.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace sln {
@@ -19,6 +20,9 @@ struct HttpCheckResult {
     std::vector<Finding> findings;
     std::string server_product;  // from Server header, for CVE matching
     std::string server_version;
+    // Every (product, version) pair worth CVE-matching: Server header
+    // product plus backend runtimes disclosed via X-Powered-By etc.
+    std::vector<std::pair<std::string, std::string>> tech_stack;
 };
 
 // Checks the response of the site root: server version disclosure,
@@ -105,6 +109,16 @@ std::vector<Finding> check_sensitive_paths(Stream& stream,
         {"/phpmyadmin/", "phpMyAdmin exposed", Severity::Low,
          "A phpMyAdmin login page is reachable; expect brute-force attempts.",
          "phpMyAdmin"},
+        {"/manager/html", "Tomcat Manager exposed", Severity::High,
+         "The Tomcat web application manager is reachable; it allows WAR "
+         "deployment, which means remote code execution with valid "
+         "credentials (and brute-force now knows the door).",
+         "Apache Tomcat"},
+        {"/wp-json/wp/v2/users", "WordPress user enumeration via REST API",
+         Severity::Medium,
+         "The WordPress REST API returns the list of registered users "
+         "without authentication; the logins feed password attacks.",
+         "\"slug\""},
         {"/robots.txt", "robots.txt discloses private paths", Severity::Info,
          "robots.txt enumerates directories the site prefers to keep out of "
          "search engines; these paths are a useful target list. Informational.",
