@@ -1,0 +1,204 @@
+{
+  "probes": [
+    {
+      "name": "NULL-banner",
+      "payload": null,
+      "wait_ms": 1500,
+      "matches": [
+        {
+          "service": "ssh",
+          "regex": "^SSH-\\d\\.\\d-(OpenSSH)_([\\d.p]+)",
+          "product_group": 1,
+          "version_group": 2
+        },
+        {
+          "service": "ssh",
+          "regex": "^SSH-\\d\\.\\d-(\\S+?)_([\\d.p]+)",
+          "product_group": 1,
+          "version_group": 2
+        },
+        {
+          "service": "ssh",
+          "regex": "^SSH-",
+          "product": "SSH server"
+        },
+        {
+          "service": "ftp",
+          "regex": "^220[ -].*[Vv][Ss][Ff][Tt][Pp][Dd] ([\\d.]+)",
+          "product": "vsftpd",
+          "version_group": 1
+        },
+        {
+          "service": "ftp",
+          "regex": "^220[ -].*[Pp]ro[Ff][Tt][Pp][Dd] \\(?version ([\\d.]+)",
+          "product": "ProFTPD",
+          "version_group": 1
+        },
+        {
+          "service": "ftp",
+          "regex": "^220[ -].*Pure-?[Ff][Tt][Pp][Dd]",
+          "product": "Pure-FTPD"
+        },
+        {
+          "service": "ftp",
+          "regex": "^220[ -].*FileZilla",
+          "product": "FileZilla FTP Server"
+        },
+        {
+          "service": "ftp",
+          "regex": "^220[ -](?!.*ESMTP)",
+          "product": "FTP server"
+        },
+        {
+          "service": "smtp",
+          "regex": "^220[ -]\\S* ?(Postfix|Exim|Sendmail)",
+          "product_group": 1
+        },
+        {
+          "service": "smtp",
+          "regex": "^220[ -].*Microsoft ESMTP",
+          "product": "Microsoft Exchange"
+        },
+        {
+          "service": "smtp",
+          "regex": "^220[ -]",
+          "product": "SMTP server"
+        },
+        {
+          "service": "redis",
+          "regex": "^-ERR|^[+-](PONG|OK)\\r?\\n",
+          "product": "Redis"
+        },
+        {
+          "service": "mysql",
+          "regex": "^.{1,4}\\x0a([0-9][0-9a-zA-Z.\\-]*)\\x00",
+          "product": "MySQL",
+          "version_group": 1
+        },
+        {
+          "service": "vnc",
+          "regex": "^RFB \\d{3}\\.\\d{3}",
+          "product": "VNC server"
+        },
+        {
+          "service": "imap",
+          "regex": "^\\* OK.*(Dovecot|Courier)",
+          "product_group": 1
+        },
+        {
+          "service": "imap",
+          "regex": "^\\* (OK|PREAUTH)",
+          "product": "IMAP server"
+        },
+        {
+          "service": "pop3",
+          "regex": "^\\+OK.*Dovecot",
+          "product": "Dovecot"
+        },
+        {
+          "service": "pop3",
+          "regex": "^\\+OK",
+          "product": "POP3 server"
+        },
+        {
+          "service": "telnet",
+          "regex": "\\xff[\\xfb\\xfd\\xfe]",
+          "product": "Telnet server"
+        },
+        {
+          "service": "irc",
+          "regex": "^NOTICE AUTH|^:\\S+ NOTICE AUTH",
+          "product": "IRC server"
+        }
+      ]
+    },
+    {
+      "name": "http-get",
+      "payload": "GET / HTTP/1.1\r\nHost: {host}\r\nUser-Agent: Mozilla/5.0 (compatible; Sleipnir/0.1)\r\nAccept: */*\r\nConnection: close\r\n\r\n",
+      "wait_ms": 2500,
+      "matches": [
+        {
+          "service": "http",
+          "regex": "Apache Tomcat/([\\d.]+)",
+          "product": "Apache Tomcat",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "Apache-Coyote",
+          "product": "Apache Tomcat"
+        },
+        {
+          "service": "http",
+          "regex": "^HTTP/\\d\\.\\d\\s+\\d{3}",
+          "product": "HTTP server"
+        }
+      ]
+    },
+    {
+      "name": "redis-ping",
+      "payload": "PING\r\n",
+      "wait_ms": 1000,
+      "matches": [
+        {
+          "service": "redis",
+          "regex": "^\\+PONG|^-ERR unknown command",
+          "product": "Redis"
+        }
+      ]
+    },
+    {
+      "name": "postgres-startup",
+      "payload": "\u0000\u0000\u0000)\u0000\u0003\u0000\u0000user\u0000postgres\u0000database\u0000postgres\u0000\u0000",
+      "wait_ms": 1500,
+      "matches": [
+        {
+          "service": "postgresql",
+          "regex": "SFATAL|SERROR",
+          "product": "PostgreSQL"
+        },
+        {
+          "service": "postgresql",
+          "regex": "^R\u0000\u0000\u0000\u000c\u0000\u0000\u0000\u0005",
+          "product": "PostgreSQL"
+        }
+      ]
+    },
+    {
+      "name": "mongodb-ismaster",
+      "payload": "\u002c\u0000\u0000\u0000\u0001\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u00d4\u0007\u0000\u0000admin.$cmd\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0013\u0000\u0000\u0000\u0010ismaster\u0000\u0001\u0000\u0000\u0000\u0000",
+      "wait_ms": 1500,
+      "matches": [
+        {
+          "service": "mongodb",
+          "regex": "maxBsonObjectSize|ismaster",
+          "product": "MongoDB"
+        }
+      ]
+    },
+    {
+      "name": "irc-nick",
+      "payload": "NICK sleipnir_probe\r\nUSER sleipnir 0 * :sleipnir\r\n",
+      "wait_ms": 1500,
+      "matches": [
+        {
+          "service": "irc",
+          "regex": "Unreal(3\\.[0-9.]+)",
+          "product": "UnrealIRCd",
+          "version_group": 1
+        },
+        {
+          "service": "irc",
+          "regex": "^:\\S+ \\d{3}",
+          "product": "IRC server"
+        }
+      ]
+    },
+    {
+      "name": "generic-echo",
+      "payload": "\r\n",
+      "wait_ms": 800,
+      "matches": []
+    }
+  ]
+}

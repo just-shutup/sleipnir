@@ -1,0 +1,566 @@
+{
+  "openssh": {
+    "product": "OpenSSH",
+    "aliases": ["openssh"],
+    "vulns": [
+      {
+        "cve": "CVE-2024-6387",
+        "affected": "<9.8p1",
+        "cvss": 8.1,
+        "summary": "regreSSHion: race condition in signal handling allows unauthenticated remote code execution (glibc-based Linux servers, OpenSSH 8.5p1-9.7p1 especially vulnerable)"
+      },
+      {
+        "cve": "CVE-2023-38408",
+        "affected": "<9.3p2",
+        "cvss": 9.8,
+        "summary": "ssh-agent forwarding: remote code execution via PKCS#11 module loading"
+      },
+      {
+        "cve": "CVE-2023-48795",
+        "affected": "<9.6p1",
+        "cvss": 5.9,
+        "summary": "Terrapin: prefix truncation attack on the SSH transport protocol with certain algorithm negotiations"
+      },
+      {
+        "cve": "CVE-2018-15473",
+        "affected": "<7.8",
+        "cvss": 5.3,
+        "summary": "User enumeration via malformed username handling in the authentication loop"
+      },
+      {
+        "cve": "CVE-2016-0777",
+        "affected": "<7.1p2",
+        "cvss": 4.3,
+        "summary": "roam buffer leak: local private keys can be leaked when connecting to a malicious server"
+      },
+      {
+        "cve": "CVE-2016-10009",
+        "affected": "<7.4",
+        "cvss": 7.5,
+        "summary": "Malformed X.509 certificates in ssh-agent allow loading an arbitrary shared library (code execution)"
+      },
+      {
+        "cve": "CVE-2017-15906",
+        "affected": "<7.6",
+        "cvss": 5.3,
+        "summary": "sftp-server process execution bypass: the read-only restriction can be circumvented"
+      },
+      {
+        "cve": "CVE-2008-5161",
+        "affected": "<5.2",
+        "cvss": 5.0,
+        "summary": "CBC mode error handling leaks plaintext blocks of the session traffic"
+      },
+      {
+        "cve": "CVE-2001-0144",
+        "affected": "<2.3.0",
+        "cvss": 7.5,
+        "summary": "CRC32 compensation attack detector allows remote root code execution on legacy SSH-1 sessions"
+      }
+    ]
+  },
+  "vsftpd": {
+    "product": "vsftpd",
+    "aliases": ["vsftpd"],
+    "vulns": [
+      {
+        "cve": "CVE-2011-2523",
+        "affected": "==2.3.4",
+        "cvss": 10.0,
+        "summary": "Backdoor in vsftpd 2.3.4 downloaded between 2011-06-30 and 2011-07-03: the smiley-face trigger opens a root shell on port 6200"
+      },
+      {
+        "cve": "CVE-2015-1419",
+        "affected": "<3.0.3",
+        "cvss": 7.5,
+        "summary": "Denial of service / possible code execution via config directive manipulation (DenyFiles / allow_writable_root)"
+      },
+      {
+        "cve": "CVE-2011-0762",
+        "affected": "<3.0.0",
+        "cvss": 5.0,
+        "summary": "Directory timing leak and ACL bypass via crafted deny filters"
+      }
+    ]
+  },
+  "proftpd": {
+    "product": "ProFTPD",
+    "aliases": ["proftpd"],
+    "vulns": [
+      {
+        "cve": "CVE-2019-12815",
+        "affected": "<1.3.6",
+        "cvss": 9.8,
+        "summary": "Arbitrary file copy via mod_copy (SITE CPFR/CPTO) allows authenticated users to overwrite files"
+      },
+      {
+        "cve": "CVE-2015-3306",
+        "affected": "<1.3.3d",
+        "cvss": 10.0,
+        "summary": "mod_copy memory corruption leading to root code execution"
+      },
+      {
+        "cve": "CVE-2010-4221",
+        "affected": "<1.3.3c",
+        "cvss": 10.0,
+        "summary": "Buffer overflow in the Telnet IAC handling of the control channel gives remote root code execution"
+      },
+      {
+        "cve": "CVE-2011-1137",
+        "affected": "<1.3.3d",
+        "cvss": 7.5,
+        "summary": "Remote buffer overflow via crafted SITE command arguments"
+      }
+    ]
+  },
+  "apache": {
+    "product": "Apache httpd",
+    "aliases": ["apache", "apache httpd"],
+    "vulns": [
+      {
+        "cve": "CVE-2021-41773",
+        "affected": "==2.4.49",
+        "cvss": 9.8,
+        "summary": "Path traversal and file disclosure when mod_cgi is enabled (RCE possible)"
+      },
+      {
+        "cve": "CVE-2021-42013",
+        "affected": "==2.4.50",
+        "cvss": 9.8,
+        "summary": "Incomplete fix of CVE-2021-41773: path traversal with double URL encoding, RCE with mod_cgi"
+      },
+      {
+        "cve": "CVE-2017-9798",
+        "affected": "<2.4.28",
+        "cvss": 7.5,
+        "summary": "Optionsbleed: memory leak in mod_http2 / .htaccess handling leaks memory contents"
+      },
+      {
+        "cve": "CVE-2019-0211",
+        "affected": "<2.4.39",
+        "cvss": 9.8,
+        "summary": "Privilege escalation from www-data to root via script execution during graceful restart"
+      },
+      {
+        "cve": "CVE-2014-0117",
+        "affected": "<2.2.27",
+        "cvss": 7.5,
+        "summary": "mod_proxy denial of service (worker slot exhaustion) via specially crafted requests"
+      },
+      {
+        "cve": "CVE-2014-0231",
+        "affected": "<2.2.27",
+        "cvss": 7.1,
+        "summary": "mod_cgid denial of service: unbounded waiting threads exhaust the CGI daemon"
+      },
+      {
+        "cve": "CVE-2012-0031",
+        "affected": "<2.2.22",
+        "cvss": 4.9,
+        "summary": "Scoreboard corruption lets a child process read another child's memory on ungraceful restart"
+      },
+      {
+        "cve": "CVE-2010-1452",
+        "affected": "<2.2.16",
+        "cvss": 5.0,
+        "summary": "mod_dav denial of service via crafted request leading to daemon hang"
+      }
+    ]
+  },
+  "nginx": {
+    "product": "nginx",
+    "aliases": ["nginx"],
+    "vulns": [
+      {
+        "cve": "CVE-2021-23017",
+        "affected": "<1.21.0",
+        "cvss": 9.4,
+        "summary": "DNS resolver off-by-one heap corruption allows RCE in resolver-enabled configurations"
+      },
+      {
+        "cve": "CVE-2019-9511",
+        "affected": "<1.17.3",
+        "cvss": 7.5,
+        "summary": "HTTP/2 Data Dribble denial of service"
+      },
+      {
+        "cve": "CVE-2013-2028",
+        "affected": ">=1.3.9 <=1.4.0",
+        "cvss": 9.8,
+        "summary": "Heap buffer overflow in chunked transfer encoding decoding allows remote code execution"
+      }
+    ]
+  },
+  "exim": {
+    "product": "Exim",
+    "aliases": ["exim"],
+    "vulns": [
+      {
+        "cve": "CVE-2019-10149",
+        "affected": "<4.92.2",
+        "cvss": 9.8,
+        "summary": "The Return of the WIZard: RCPT TO command injection leads to root RCE"
+      },
+      {
+        "cve": "CVE-2020-28018",
+        "affected": "<4.94.2",
+        "cvss": 9.8,
+        "summary": "Use-after-free in smtp_ungetc during TLS-capable session handling allows remote code execution"
+      },
+      {
+        "cve": "CVE-2016-1531",
+        "affected": "<4.86.2",
+        "cvss": 7.2,
+        "summary": "perl_startup argument handling allows local privilege escalation to root"
+      }
+    ]
+  },
+  "postfix": {
+    "product": "Postfix",
+    "aliases": ["postfix"],
+    "vulns": [
+      {
+        "cve": "CVE-2023-51764",
+        "affected": "<3.8.5",
+        "cvss": 9.8,
+        "summary": "SMTP smuggling: message smuggling via specially crafted BDAT/STARTTLS sequences"
+      }
+    ]
+  },
+  "openssl": {
+    "product": "OpenSSL",
+    "aliases": ["openssl"],
+    "vulns": [
+      {
+        "cve": "CVE-2014-0160",
+        "affected": ">=1.0.1 <=1.0.1f",
+        "cvss": 7.5,
+        "summary": "Heartbleed: TLS heartbeat extension read overflow leaks up to 64KB of server memory per request"
+      },
+      {
+        "cve": "CVE-2014-0224",
+        "affected": ">=1.0.1 <1.0.1i",
+        "cvss": 6.4,
+        "summary": "CCS injection: man-in-the-middle can downgrade to weak key material"
+      },
+      {
+        "cve": "CVE-2015-0204",
+        "affected": "<1.0.2e",
+        "cvss": 4.3,
+        "summary": "FREAK: export-grade RSA ciphers can be negotiated and broken by a man-in-the-middle"
+      },
+      {
+        "cve": "CVE-2016-2107",
+        "affected": ">=1.0.1 <1.0.1t",
+        "cvss": 5.9,
+        "summary": "AES-NI padding oracle: encrypted data can be recovered with crafted TLS records"
+      },
+      {
+        "cve": "CVE-2022-3602",
+        "affected": ">=3.0.0 <=3.0.6",
+        "cvss": 7.5,
+        "summary": "X.509 punycode decoder buffer overflow during certificate validation (potential RCE)"
+      }
+    ]
+  },
+  "dropbear": {
+    "product": "Dropbear",
+    "aliases": ["dropbear"],
+    "vulns": [
+      {
+        "cve": "CVE-2018-15599",
+        "affected": "<2018.76",
+        "cvss": 5.0,
+        "summary": "Username enumeration via response timing"
+      },
+      {
+        "cve": "CVE-2016-7406",
+        "affected": "<2016.74",
+        "cvss": 9.8,
+        "summary": "Heap overflow in the Dropbear server on 64-bit platforms leads to remote code execution"
+      },
+      {
+        "cve": "CVE-2016-7407",
+        "affected": "<2016.74",
+        "cvss": 7.5,
+        "summary": "Format string issue in the Dropbear client/server allows code execution"
+      }
+    ]
+  },
+  "iis": {
+    "product": "IIS",
+    "aliases": ["microsoft-iis", "iis"],
+    "vulns": [
+      {
+        "cve": "CVE-2017-7269",
+        "affected": "==6.0",
+        "cvss": 9.8,
+        "summary": "WebDAV PROPFIND buffer overflow leads to RCE on IIS 6.0 with WebDAV enabled"
+      }
+    ]
+  },
+  "mysql": {
+    "product": "MySQL",
+    "aliases": ["mysql", "mysql server"],
+    "vulns": [
+      {
+        "cve": "CVE-2012-2122",
+        "affected": ">=5.0 <=5.5.23",
+        "cvss": 4.8,
+        "summary": "Authentication bypass: crafted challenge responses comparing equal to the stored hash grant access with any password"
+      },
+      {
+        "cve": "CVE-2016-6663",
+        "affected": ">=5.5 <5.5.53",
+        "cvss": 8.1,
+        "summary": "Race condition allows an attacker with SQL access to escalate to the mysql system user"
+      },
+      {
+        "cve": "CVE-2016-6664",
+        "affected": ">=5.5 <5.5.53",
+        "cvss": 9.8,
+        "summary": "Root privilege escalation via RESTART of the mysqld_safe wrapper (binlog-based)"
+      },
+      {
+        "cve": "CVE-2017-3599",
+        "affected": "<5.5.54",
+        "cvss": 8.1,
+        "summary": "Pre-authentication denial of service via crafted connection sequence in the client protocol parser"
+      }
+    ]
+  },
+  "mariadb": {
+    "product": "MariaDB",
+    "aliases": ["mariadb"],
+    "vulns": [
+      {
+        "cve": "CVE-2012-2122",
+        "affected": ">=5.2 <=5.5.23",
+        "cvss": 4.8,
+        "summary": "Authentication bypass inherited from MySQL: hash comparison flaw grants access with any password"
+      },
+      {
+        "cve": "CVE-2021-27928",
+        "affected": ">=10.0 <10.5.11",
+        "cvss": 9.8,
+        "summary": "wsrep provider path is not sanitized: a user with SQL access can execute arbitrary code as the mysql user"
+      },
+      {
+        "cve": "CVE-2022-32089",
+        "affected": ">=10.0 <10.8.4",
+        "cvss": 5.5,
+        "summary": "Denial of service in the optimizer via crafted subqueries"
+      }
+    ]
+  },
+  "postgresql": {
+    "product": "PostgreSQL",
+    "aliases": ["postgresql", "postgres"],
+    "vulns": [
+      {
+        "cve": "CVE-2019-9193",
+        "affected": "<11.2",
+        "cvss": 8.8,
+        "summary": "COPY FROM PROGRAM executes shell commands as the database superuser when a role has pg_execute_server_program"
+      },
+      {
+        "cve": "CVE-2016-5424",
+        "affected": ">=9.0 <9.3.15",
+        "cvss": 8.5,
+        "summary": "Client certificates are accepted without checking certificate revocation lists in certain configurations"
+      },
+      {
+        "cve": "CVE-2014-0064",
+        "affected": ">=8.4 <9.3.3",
+        "cvss": 6.5,
+        "summary": "Range types and to_char SQL functions lack overflow checks leading to crashes / memory disclosure"
+      },
+      {
+        "cve": "CVE-2013-1899",
+        "affected": ">=9.0 <9.2.4",
+        "cvss": 8.5,
+        "summary": "Unauthenticated connection can overwrite configuration files via crafted database name"
+      }
+    ]
+  },
+  "redis": {
+    "product": "Redis",
+    "aliases": ["redis"],
+    "vulns": [
+      {
+        "cve": "CVE-2022-0543",
+        "affected": "<6.0.17",
+        "cvss": 10.0,
+        "summary": "Debian-packaged Redis ships with an incomplete Lua sandbox escape: EVAL allows remote code execution as the redis user"
+      },
+      {
+        "cve": "CVE-2016-8339",
+        "affected": "<3.2.4",
+        "cvss": 9.8,
+        "summary": "Embedded Lua interpreter allows remote code execution through a crafted EVAL request"
+      },
+      {
+        "cve": "CVE-2015-8080",
+        "summary": "Integer overflow in the LUANUMBER parsing leads to memory corruption",
+        "affected": "<3.0.6",
+        "cvss": 5.0
+      },
+      {
+        "cve": "CVE-2021-32675",
+        "affected": "<6.2.5",
+        "cvss": 7.5,
+        "summary": "Stream handling denial of service via crafted XLPOP/XADD sequences"
+      }
+    ]
+  },
+  "mongodb": {
+    "product": "MongoDB",
+    "aliases": ["mongodb", "mongod"],
+    "vulns": [
+      {
+        "cve": "CVE-2016-6494",
+        "affected": "<3.2.9",
+        "cvss": 5.0,
+        "summary": "Server logs are world-readable and contain connection secrets (world-readable files)"
+      },
+      {
+        "cve": "CVE-2013-1892",
+        "affected": "<2.2.4",
+        "cvss": 7.5,
+        "summary": "Uninitialized BSON memory disclosure allows heap contents to be returned to the client"
+      }
+    ]
+  },
+  "dovecot": {
+    "product": "Dovecot",
+    "aliases": ["dovecot"],
+    "vulns": [
+      {
+        "cve": "CVE-2019-11500",
+        "affected": "<2.3.7.1",
+        "cvss": 7.5,
+        "summary": "Improper NULL-byte handling in mail index parsing allows crash or code execution in IMAP/POP3"
+      },
+      {
+        "cve": "CVE-2019-3814",
+        "affected": "<2.3.5",
+        "cvss": 5.3,
+        "summary": "SSL certificate authentication bypass in some client settings combinations"
+      }
+    ]
+  },
+  "tomcat": {
+    "product": "Apache Tomcat",
+    "aliases": ["tomcat", "apache tomcat", "apache-coyote"],
+    "vulns": [
+      {
+        "cve": "CVE-2017-12617",
+        "affected": ">=7.0 <7.0.82",
+        "cvss": 8.1,
+        "summary": "JSP upload via PUT with read-only=false defaults allows remote code execution"
+      },
+      {
+        "cve": "CVE-2017-12617",
+        "affected": ">=8.0 <8.0.47",
+        "cvss": 8.1,
+        "summary": "JSP upload via PUT with read-only=false defaults allows remote code execution"
+      },
+      {
+        "cve": "CVE-2017-12617",
+        "affected": ">=8.5 <8.5.23",
+        "cvss": 8.1,
+        "summary": "JSP upload via PUT with read-only=false defaults allows remote code execution"
+      },
+      {
+        "cve": "CVE-2010-2227",
+        "affected": ">=5.5 <5.5.30",
+        "cvss": 6.9,
+        "summary": "Directory traversal in the Manager application request handling"
+      },
+      {
+        "cve": "CVE-2010-2227",
+        "affected": ">=6.0 <6.0.28",
+        "cvss": 6.9,
+        "summary": "Directory traversal in the Manager application request handling"
+      },
+      {
+        "cve": "CVE-2009-3548",
+        "affected": "<5.5.28",
+        "cvss": 7.5,
+        "summary": "Manager application with default credentials allows WAR deployment and remote code execution"
+      }
+    ]
+  },
+  "sendmail": {
+    "product": "Sendmail",
+    "aliases": ["sendmail"],
+    "vulns": [
+      {
+        "cve": "CVE-2003-0161",
+        "affected": "<8.12.9",
+        "cvss": 10.0,
+        "summary": "Pre-authentication heap overflow in address parsing gives remote root code execution"
+      },
+      {
+        "cve": "CVE-2002-1335",
+        "affected": "<8.12.7",
+        "cvss": 7.5,
+        "summary": "Buffer overflow via crafted message headers allows remote code execution"
+      }
+    ]
+  },
+  "pure-ftpd": {
+    "product": "Pure-FTPD",
+    "aliases": ["pure-ftpd", "pureftpd"],
+    "vulns": [
+      {
+        "cve": "CVE-2015-1417",
+        "affected": "<1.0.36",
+        "cvss": 5.0,
+        "summary": "Directory permission handling flaw allows authenticated users to escape their upload root"
+      }
+    ]
+  },
+  "filezilla ftp server": {
+    "product": "FileZilla FTP Server",
+    "aliases": ["filezilla ftp server", "filezilla"],
+    "vulns": [
+      {
+        "cve": "CVE-2015-2899",
+        "affected": "<0.9.54",
+        "cvss": 5.0,
+        "summary": "Remote denial of service via malformed authentication sequences"
+      }
+    ]
+  },
+  "microsoft exchange": {
+    "product": "Microsoft Exchange",
+    "aliases": ["microsoft exchange", "exchange"],
+    "vulns": [
+      {
+        "cve": "CVE-2021-34473",
+        "affected": "<15.2.792.3",
+        "cvss": 9.8,
+        "summary": "ProxyLogon family: SSRF in the Client Access Service allows arbitrary backend calls and admin access"
+      },
+      {
+        "cve": "CVE-2018-8581",
+        "affected": "<15.1.1466.3",
+        "cvss": 9.8,
+        "summary": "Cross-site request forgery via NTLM relay gives mailbox takeover and arbitrary code execution in the admin context"
+      }
+    ]
+  },
+  "unrealircd": {
+    "product": "UnrealIRCd",
+    "aliases": ["unrealircd"],
+    "vulns": [
+      {
+        "cve": "CVE-2010-2075",
+        "affected": ">=3.2.8 <=3.2.8.1",
+        "cvss": 10.0,
+        "summary": "Trojaned 3.2.8.1 distribution contains a backdoor triggered by an AB command allowing remote code execution as the IRCd user"
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+# build artifacts
+build/
+*.o
+*.a
+
+# editor / tooling
+.zcode/
+.vscode/
+.idea/
+*.swp
+
+# scan outputs
+report.json
+report.html
+*.tar.gz
