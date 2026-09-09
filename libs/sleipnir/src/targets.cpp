@@ -90,7 +90,11 @@ std::vector<std::string> expand_targets(const std::vector<std::string>& specs,
         } else if (is_ipv4_literal(host_part)) {
             out.insert(host_part);
         } else if (!host_part.empty()) {
-            out.insert(resolve_host(host_part));
+            // Validate resolvability early (fail fast), but keep the hostname:
+            // TLS SNI, HTTP Host headers and readable reports all need the
+            // original name, not the resolved address.
+            resolve_host(host_part);
+            out.insert(host_part);
         } else {
             throw std::runtime_error("empty target in '" + raw + "'");
         }

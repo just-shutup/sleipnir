@@ -333,6 +333,77 @@ class WordPressHandler(BaseHTTPRequestHandler):
         pass
 
 
+class SpaHandler(BaseHTTPRequestHandler):
+    """A generic JS-SPA backend: GraphQL with introspection, Spring-style
+    actuator, OpenAPI docs, a shipped package.json and a search endpoint
+    that breaks on quotes."""
+
+    server_version = "mock-spa"
+
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        if path == "/":
+            body = (
+                b"<!DOCTYPE html><html><head><title>Mock SPA</title></head>"
+                b"<body><app-root></app-root>"
+                b'<script src="/main.js"></script></body></html>'
+            )
+            self._send(200, body, "text/html")
+        elif path == "/graphql":
+            if "__schema" in query:
+                body = (
+                    b'{"data":{"__schema":{"types":['
+                    b'{"kind":"SCALAR","name":"String"},'
+                    b'{"kind":"OBJECT","name":"User"},'
+                    b'{"kind":"OBJECT","name":"Product"}]}}}'
+                )
+                self._send(200, body, "application/json")
+            else:
+                self._send(400,
+                           b'{"errors":[{"message":"GET query missing."}]}',
+                           "application/json")
+        elif path == "/actuator":
+            body = (
+                b'{"_links":{"self":{"href":"/actuator"},'
+                b'"health":{"href":"/actuator/health"},'
+                b'"env":{"href":"/actuator/env"}}}'
+            )
+            self._send(200, body, "application/json")
+        elif path == "/v3/api-docs":
+            body = (
+                b'{"openapi":"3.0.1","info":{"title":"Mock API","version":"1.0"},'
+                b'"paths":{"/users":{"get":{}},"/admin":{"get":{}}}}'
+            )
+            self._send(200, body, "application/json")
+        elif path == "/package.json":
+            body = (
+                b'{"name":"mock-spa","version":"1.2.3",'
+                b'"dependencies":{"express":"^4.18.0","sqlite3":"^5.0.2"}}'
+            )
+            self._send(200, body, "application/json")
+        elif path == "/search":
+            if "'" in query:
+                body = (
+                    b'{"errors":[{"message":"SQLITE_ERROR: near \')\':'
+                    b' syntax error"}]}'
+                )
+                self._send(500, body, "application/json")
+            else:
+                self._send(200, b'{"results":[]}', "application/json")
+        else:
+            self._send(404, b'{"message":"not found"}', "application/json")
+
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
 SERVICES = [
     ("ssh", 2201, SshHandler),
     ("ftp-vuln", 2101, FtpHandler),
@@ -345,6 +416,7 @@ SERVICES = [
     ("redis", 6380, RedisLabHandler),
     ("docker-api", 2375, DockerApiHandler, LabHTTPServer),
     ("wordpress", 8081, WordPressHandler, LabHTTPServer),
+    ("spa", 8082, SpaHandler, LabHTTPServer),
 ]
 
 

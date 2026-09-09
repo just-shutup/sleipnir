@@ -44,6 +44,19 @@ std::vector<Finding> check_http_methods(Stream& stream,
                                         uint16_t port, int timeout_ms,
                                         const std::string& user_agent);
 
+// Content-level probes for web applications: GraphQL introspection, Spring
+// Boot actuator, API documentation, application manifests, and a bounded
+// single-quote probe of search endpoints with strict database-error markers.
+template <typename Stream>
+std::vector<Finding> check_webapp_probes(Stream& stream,
+                                         const std::string& host,
+                                         uint16_t port, int timeout_ms,
+                                         const std::string& user_agent);
+
+// Testable classifiers used by check_webapp_probes.
+bool looks_like_sql_error(const std::string& body);
+bool graphql_introspection_reply(const std::string& body);
+
 namespace detail {
 
 inline Finding make_finding(const std::string& host, uint16_t port,
@@ -59,6 +72,15 @@ inline Finding make_finding(const std::string& host, uint16_t port,
     f.evidence = evidence;
     f.source = "builtin";
     return f;
+}
+
+inline bool ascii_lower_contains(const std::string& haystack,
+                                 const std::string& needle) {
+    std::string low;
+    low.reserve(haystack.size());
+    for (char c : haystack)
+        low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return low.find(needle) != std::string::npos;
 }
 
 } // namespace detail
@@ -129,7 +151,8 @@ std::vector<Finding> check_sensitive_paths(Stream& stream,
     for (const auto& pc : paths) {
         auto resp = http_get(stream, host, port, pc.path, timeout_ms,
                              user_agent);
-        if (!stream.is_open()) break; // server gone / connection consumed
+        // no is_open() shortcut here: with Connection: close the socket is
+        // typically closed after each request; http_get reconnects anyway
         if (!resp || resp->status != 200) continue;
         if (pc.body_marker &&
             resp->body.find(pc.body_marker) == std::string::npos)
@@ -186,6 +209,122 @@ std::vector<Finding> check_http_methods(Stream& stream,
 }
 
 // Convenience wrappers for plain-TCP call sites (engine, plugins, tests).
+template <typename Stream>
+std::vector<Finding> check_webapp_probes(Stream& stream,
+                                         const std::string& host,
+                                         uint16_t port, int timeout_ms,
+                                         const std::string& user_agent) {
+    std::vector<Finding> out;
+    auto add = [&](const std::string& title, Severity sev,
+                   const std::string& description,
+                   const std::string& evidence) {
+        out.push_back(detail::make_finding(host, port, title, sev, description,
+                                           evidence));
+    };
+
+    // GraphQL: detect the endpoint first, then try introspection. Enabled
+    // introspection hands an attacker the complete API schema.
+    if (auto gq = http_get(stream, host, port, "/graphql", timeout_ms,
+                           user_agent);
+        gq && !gq->body.empty() &&
+        (detail::ascii_lower_contains(gq->body, "graphql") ||
+         detail::ascii_lower_contains(gq->body, "graphiql") ||
+         gq->status == 400 || gq->status == 405 || gq->status == 200)) {
+        auto intro = http_get(
+            stream, host, port,
+            "/graphql?query={__schema%20{types%20{name}}}", timeout_ms,
+            user_agent);
+        if (intro && intro->status == 200 &&
+            graphql_introspection_reply(intro->body)) {
+            add("GraphQL introspection enabled", Severity::Medium,
+                "The GraphQL endpoint answers introspection queries without "
+                "authentication, disclosing the full API schema: types, "
+                "fields and relations. That map drives targeted queries, "
+                "including mutations outside the intended UI.",
+                "GET /graphql?query={__schema{types{name}}} -> " +
+                    std::to_string(intro->body.size()) + " bytes of schema");
+        } else {
+            add("GraphQL endpoint detected", Severity::Info,
+                "A GraphQL endpoint is reachable. Worth manual review: "
+                "introspection state, batched queries and authorization on "
+                "nested fields.",
+                "GET /graphql -> " + std::to_string(gq->status));
+        }
+    }
+
+    // Spring Boot actuator: the root endpoint lists operational routes;
+    // /env often leaks credentials.
+    if (auto act = http_get(stream, host, port, "/actuator", timeout_ms,
+                            user_agent);
+        act && act->status == 200 &&
+        act->body.find("_links") != std::string::npos) {
+        add("Spring Boot actuator exposed", Severity::High,
+            "The actuator management API is reachable without authentication. "
+            "Depending on the enabled endpoints it discloses configuration, "
+            "environment variables (often credentials), heap dumps and "
+            "shutdown controls.",
+            "GET /actuator -> 200, _links present");
+    }
+
+    // API documentation: OpenAPI/Swagger describes every internal route.
+    for (const char* path : {"/swagger.json", "/api-docs", "/v3/api-docs"}) {
+        if (auto doc = http_get(stream, host, port, path, timeout_ms,
+                                user_agent);
+            doc && doc->status == 200 &&
+            (doc->body.find("\"openapi\"") != std::string::npos ||
+             doc->body.find("\"swagger\"") != std::string::npos)) {
+            add("API documentation exposed", Severity::Low,
+                std::string("OpenAPI/Swagger specification at ") + path +
+                    " enumerates every API route, parameter and model — "
+                    "reconnaissance for free.",
+                "GET " + std::string(path) + " -> 200, " +
+                    std::to_string(doc->body.size()) + " bytes");
+            break; // one spec is enough
+        }
+    }
+
+    // Application manifest (npm SPAs ship package.json to the web root).
+    if (auto pkg = http_get(stream, host, port, "/package.json", timeout_ms,
+                            user_agent);
+        pkg && pkg->status == 200 &&
+        pkg->body.find("\"name\"") != std::string::npos &&
+        pkg->body.find("\"version\"") != std::string::npos) {
+        add("Application manifest exposed", Severity::Info,
+            "package.json is served from the web root. It names the "
+            "application and its dependency versions — a dependency lookup "
+            "produces a targeted CVE list.",
+            "GET /package.json -> 200");
+    }
+
+    // Bounded SQL-injection probe: quote-only payloads against typical search
+    // endpoints, reported only when a real database error string comes back.
+    struct SqliProbe {
+        const char* path;
+        const char* param;
+    };
+    static const SqliProbe sqli[] = {
+        {"/search", "q"}, {"/rest/products/search", "q"}, {"/api/search", "q"},
+    };
+    for (const auto& s : sqli) {
+        std::string path = std::string(s.path) + "?" + s.param + "=')";
+        auto resp = http_get(stream, host, port, path, timeout_ms, user_agent);
+        if (!resp) continue;
+        if (resp->status >= 500 || resp->status == 200) {
+            if (looks_like_sql_error(resp->body)) {
+                add("Possible SQL injection in search parameter", Severity::High,
+                    std::string("A single quote in the search parameter (") +
+                        s.param + " of " + s.path +
+                        ") produces a database error in the response. The "
+                        "endpoint concatenates input into SQL — test with "
+                        "standard injection syntax for confirmation.",
+                    "GET " + path + " -> " + std::to_string(resp->status) +
+                        ", DB error in body");
+            }
+        }
+    }
+    return out;
+}
+
 inline std::vector<Finding> check_sensitive_paths(
     TcpClient& client, const std::string& host, uint16_t port, int timeout_ms,
     const std::string& user_agent = "Sleipnir/0.1 (vulnerability scanner)") {

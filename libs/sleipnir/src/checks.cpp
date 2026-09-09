@@ -1,6 +1,7 @@
 #include "sleipnir/checks.hpp"
 
 #include <cctype>
+#include <regex>
 
 namespace sln {
 
@@ -58,6 +59,34 @@ std::string ascii_lower(std::string s) {
 }
 
 } // namespace
+
+// True when the response body contains a recognizable database error string.
+// The marker list is deliberately strict (real driver messages only) so that
+// a generic 500 page does not produce a false positive.
+bool looks_like_sql_error(const std::string& body) {
+    static const char* markers[] = {
+        "sql syntax", "sqlite_error", "sqlite3.operationalerror",
+        "you have an error in your sql syntax", "warning: sqlite",
+        "uncaught sqlite", "unclosed quotation mark",
+        "microsoft ole db provider for sql server", "pg_query(",
+        "psql: error", "syntax error at or near", "mysqlsyntaxerrorexception",
+        "org.hibernate.exception.sqlgrammarerror", "ora-",
+        "sqlserverexception", "syntax error in query expression",
+    };
+    std::string low = ascii_lower(body);
+    for (const char* m : markers)
+        if (low.find(m) != std::string::npos) return true;
+    // Oracle codes look like ORA-00942
+    if (std::regex_search(low, std::regex("ora-[0-9]{5}"))) return true;
+    return false;
+}
+
+// True when a GraphQL introspection reply is recognized: the __schema key
+// plus type names in the payload.
+bool graphql_introspection_reply(const std::string& body) {
+    return body.find("__schema") != std::string::npos &&
+           body.find("\"name\"") != std::string::npos;
+}
 
 HttpCheckResult check_root_response(const std::string& host, uint16_t port,
                                     const HttpResponse& resp) {

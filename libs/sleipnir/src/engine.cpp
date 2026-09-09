@@ -158,6 +158,9 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
                 for (auto& f : check_sensitive_paths(tls, job.host, job.port,
                                                      timeout, cfg_.user_agent))
                     collector_.add_finding(std::move(f));
+                for (auto& f : check_webapp_probes(tls, job.host, job.port,
+                                                   timeout, cfg_.user_agent))
+                    collector_.add_finding(std::move(f));
                 for (auto& f : check_http_methods(tls, job.host, job.port,
                                                   timeout, cfg_.user_agent))
                     collector_.add_finding(std::move(f));
@@ -198,6 +201,10 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
                                        cfg_.user_agent))
                 collector_.add_finding(std::move(f));
             for (auto& f :
+                 check_webapp_probes(client, job.host, job.port, timeout,
+                                     cfg_.user_agent))
+                collector_.add_finding(std::move(f));
+            for (auto& f :
                  check_http_methods(client, job.host, job.port, timeout,
                                     cfg_.user_agent))
                 collector_.add_finding(std::move(f));
@@ -209,6 +216,24 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
             plugins_.on_http_response(ctx, io, timeout, collector_);
         }
     }
+
+#ifdef SLEIPNIR_HAVE_TLS
+    // 3c. Ports that answered plain HTTP but sit on a TLS port number
+    // (proxies, double listeners): still audit the certificate.
+    if (result.service == "http" && !cfg_.no_tls && tls_ports_.count(job.port)) {
+        client.close();
+        TlsClient tls(io);
+        if (tls.connect(job.host, job.port, timeout)) {
+            const auto& peer = tls.peer();
+            result.tls = summarize_tls(job.host, peer);
+            for (auto& f : check_tls_certificate(job.host, job.port, peer))
+                collector_.add_finding(std::move(f));
+            for (auto& f : check_tls_legacy_protocols(io, job.host, job.port,
+                                                      timeout))
+                collector_.add_finding(std::move(f));
+        }
+    }
+#endif
 
     // 4. hooks that want the final picture
     plugins_.on_service(ctx, io, timeout, collector_);

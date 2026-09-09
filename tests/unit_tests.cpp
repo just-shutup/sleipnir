@@ -194,6 +194,28 @@ TEST_CASE("tech stack collects Server and X-Powered-By products") {
     CHECK(out2.server_version == "8.1.0");
 }
 
+TEST_CASE("web app probe classifiers are strict") {
+    // real database driver messages match
+    CHECK(looks_like_sql_error(
+        "{\"errors\":[{\"message\":\"SQLITE_ERROR: near \\\")\\\": syntax"
+        " error\"}]}"));
+    CHECK(looks_like_sql_error("Warning: sqlite3.query(): no such column"));
+    CHECK(looks_like_sql_error("ORA-00942: table or view does not exist"));
+    CHECK(looks_like_sql_error("You have an error in your SQL syntax; check"));
+    CHECK(looks_like_sql_error("psql: ERROR: syntax error at or near \"'\""));
+
+    // generic error pages do not
+    CHECK_FALSE(looks_like_sql_error("<html><body><h1>500 Internal Server "
+                                     "Error</h1></body></html>"));
+    CHECK_FALSE(looks_like_sql_error("{\"message\":\"invalid request\"}"));
+
+    CHECK(graphql_introspection_reply(
+        "{\"data\":{\"__schema\":{\"types\":[{\"name\":\"Query\"}]}}}"));
+    CHECK_FALSE(
+        graphql_introspection_reply("{\"errors\":[{\"message\":\"GET query"
+                                    " missing.\"}]}"));
+}
+
 TEST_CASE("http response header keys are lowercased for lookup") {
     HttpResponse resp;
     resp.headers["Content-Type"] = "text/html"; // simulate raw insertion

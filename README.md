@@ -56,7 +56,7 @@ sleipnir> exit
 
 # Сканирование только своих лабораторных сервисов (мок-лаба в комплекте)
 python3 tools/mocklab/mock_services.py &
-./sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8443
+./sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8082,8443
 ```
 
 ### Указание каталога плагинов
@@ -97,7 +97,8 @@ Sleipnir — инструмент аудита, разработанный в у
 <tr><td><b>Fingerprinting</b></td><td>Декларативная таблица проб в духе nmap: NULL-проба + активные пробы (HTTP, Redis, PostgreSQL, MongoDB, IRC) и бинарные протоколы (MySQL, VNC, telnet); 12+ типов сервисов, извлечение продукта и версии</td></tr>
 <tr><td><b>CVE-матчинг</b></td><td>Локальная база: <b>31 продукт, 95 записей</b> (OpenSSH, vsftpd, Apache, nginx, OpenSSL, MySQL, PostgreSQL, Redis, Tomcat, PHP, WordPress, Jenkins, Grafana, Elasticsearch, CouchDB, Webmin, Exchange…), constraint-язык версий (<code>&lt;9.8p1</code>, <code>&gt;=1.0 &lt;2.0</code>); стек технологий собирается из <code>Server</code> и <code>X-Powered-By</code></td></tr>
 <tr><td><b>TLS-аудит</b></td><td>Хэндшейк на TLS-портах с SNI; сертификат: срок (+окно 14 дней), самоподписанность, доверие цепочке, соответствие имени; активный детект TLS 1.0/1.1/SSL 3.0</td></tr>
-<tr><td><b>HTTP-аудит</b></td><td>Раскрытие версии в <code>Server</code>, directory listing, security-заголовки (CSP, XCTO, XFO), пермиссивная CORS, cookie без Secure/HttpOnly/SameSite, чувствительные пути (<code>/.git</code>, <code>/.env</code>, <code>/.aws/credentials</code>, <code>/phpinfo.php</code>…), методы TRACE/OPTIONS</td></tr>
+<tr><td><b>HTTP-аудит</b></td><td>Раскрытие версии в <code>Server</code> и <code>X-Powered-By</code>, directory listing, security-заголовки (CSP, XCTO, XFO), пермиссивная CORS, cookie без Secure/HttpOnly/SameSite, чувствительные пути (<code>/.git</code>, <code>/.env</code>, <code>/.aws/credentials</code>, <code>/phpinfo.php</code>…), методы TRACE/OPTIONS</td></tr>
+<tr><td><b>Web-app probes</b></td><td>Контентные проверки приложений: GraphQL introspection, Spring Boot actuator, OpenAPI/Swagger-документация, <code>package.json</code> в web-root, ограниченный SQLi-детект по ошибкам драйверов БД (строгие маркеры, без ложных срабатываний на 500-страницах)</td></tr>
 <tr><td><b>Lua-плагины</b></td><td>Хуки <code>on_port_open</code>/<code>on_service</code>/<code>on_http_response</code>; API: TCP, HTTP, HTTPS, TLS-инспекция; каждый плагин — отдельный <code>lua_State</code> без <code>io</code>/<code>os.execute</code>/<code>require</code>. В комплекте 10 проверок: неавторизованный Redis, открытый Docker API, SMTP VRFY, CORS-рефлексия, пользователи WordPress, security.txt, анонимный FTP, открытый relay, directory listing, админ-панели</td></tr>
 <tr><td><b>Robustness</b></td><td>Проверка устойчивости к некорректному вводу: детерминированный ограниченный корпус payload'ов, темповый контроль, верификация отказа переподключением; opt-in (<code>-f</code>)</td></tr>
 <tr><td><b>Отчётность</b></td><td>Цветная консоль, машиночитаемый JSON, самодостаточный HTML с распределением по критичности; <code>--fail-on SEVERITY</code> — код возврата 3 для CI/CD</td></tr>
@@ -239,7 +240,7 @@ HTML-отчёт — самодостаточный документ с inline-CS
 
 ## Мок-лаборатория
 
-Одиннадцать слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации:
+Двенадцать слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации:
 
 ```bash
 python3 tools/mocklab/mock_services.py
@@ -258,6 +259,7 @@ sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,844
 | 6380 | Redis | Redis 6.0.16 без аутентификации | CVE-2022-0543 + плагин (critical) |
 | 8080 | HTTP | Apache 2.4.49, dir listing, `/.git`, `/.env` | CVE-2021-41773 + builtin |
 | 8081 | WordPress | WP 5.8.1 / PHP 7.2.24 / nginx 1.18.0, REST-пользователи, CORS-рефлексия | CVE nginx + PHP + WordPress + 3 плагина |
+| 8082 | SPA | GraphQL introspection, Spring actuator, OpenAPI, `package.json`, SQL-ошибка в поиске | web-app probes: SQLi (high), actuator (high), GraphQL (medium) |
 | 8443 | HTTPS | то же поверх TLS, самоподписанный сертификат (CN=mock.lab, 1 день) | CVE + TLS-находки |
 
 ---
@@ -295,4 +297,4 @@ sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,844
 
 ## Проект
 
-Sleipnir v0.4.0 — это самостоятельный проект по информационной безопасности: асинхронный сетевой движок на Asio, интеграция Lua (sol2), декларативные базы знаний с языком ограничений версий, TLS-инспекция на OpenSSL и методика самотестирования на воспроизводимом полигоне с негативными тестами.
+Sleipnir v0.5.0 — это самостоятельный проект по информационной безопасности: асинхронный сетевой движок на Asio, интеграция Lua (sol2), декларативные базы знаний с языком ограничений версий, TLS-инспекция на OpenSSL и методика самотестирования на воспроизводимом полигоне с негативными тестами.
