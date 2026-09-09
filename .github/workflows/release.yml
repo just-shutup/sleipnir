@@ -14,7 +14,12 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake g++ libssl-dev
+        run: |
+          # GitHub runner images ship a Google Chrome apt repo that
+          # intermittently serves broken indexes; it is not needed here.
+          sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ libssl-dev
 
       - name: Build
         run: |
