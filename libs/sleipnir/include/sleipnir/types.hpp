@@ -87,6 +87,12 @@ struct ScanConfig {
     int delay_ms = 0;          // pause between jobs per worker
     std::string user_agent = "Sleipnir/0.1 (vulnerability scanner)";
 
+    // Web crawler and active application probes.
+    bool no_crawl = false;
+    int crawl_depth = 3;         // link depth from the start page
+    int crawl_max_pages = 40;    // page fetch budget per HTTP port
+    int crawl_max_requests = 120; // active probe budget (XSS, traversal, ...)
+
     // CI gate (--fail-on SEVERITY): empty -> disabled.
     std::string fail_on;
 };

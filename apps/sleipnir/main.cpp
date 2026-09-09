@@ -229,6 +229,18 @@ std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
     scan->add_option("--user-agent", cfg.user_agent, "HTTP User-Agent header")
         ->capture_default_str();
 
+    // Web crawler
+    scan->add_flag("--no-crawl", cfg.no_crawl, "Disable the web crawler");
+    scan->add_option("--crawl-depth", cfg.crawl_depth,
+                     "Crawler link depth from the start page")
+        ->capture_default_str();
+    scan->add_option("--crawl-max-pages", cfg.crawl_max_pages,
+                     "Crawler page budget per port")
+        ->capture_default_str();
+    scan->add_option("--crawl-max-requests", cfg.crawl_max_requests,
+                     "Active web probe budget (XSS, traversal, redirects)")
+        ->capture_default_str();
+
     // CI gate
     scan->add_option("--fail-on", cfg.fail_on,
                      "Exit with code 3 when findings reach SEVERITY "

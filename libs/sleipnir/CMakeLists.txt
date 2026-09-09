@@ -9,6 +9,7 @@ add_library(sleipnir STATIC
     src/probes.cpp
     src/http_client.cpp
     src/checks.cpp
+    src/crawler.cpp
     src/plugins.cpp
     src/fuzz.cpp
     src/engine.cpp

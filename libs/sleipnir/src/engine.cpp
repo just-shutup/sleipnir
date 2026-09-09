@@ -1,4 +1,5 @@
 #include "sleipnir/engine.hpp"
+#include "sleipnir/crawler.hpp"
 #include "sleipnir/fuzz.hpp"
 #include "sleipnir/netio.hpp"
 #include "sleipnir/targets.hpp"
@@ -15,6 +16,37 @@
 #include <thread>
 
 namespace sln {
+
+namespace {
+
+// Maps the site graph and runs the active application probes on one
+// (host, port) using the given transport.
+template <typename Stream>
+void crawl_and_assess(Stream& stream, const std::string& host, uint16_t port,
+                      const ScanConfig& cfg, int timeout, const char* scheme,
+                      ResultCollector& collector) {
+    CrawlConfig cc;
+    cc.max_pages = cfg.crawl_max_pages;
+    cc.max_depth = cfg.crawl_depth;
+    cc.scheme = scheme;
+    cc.host = host;
+    cc.port = port;
+    HttpFetcher fetch = [&](const std::string& path) {
+        return http_get(stream, host, port, path, timeout, cfg.user_agent);
+    };
+    auto crawl = crawl_site(fetch, "/", cc);
+    collector.log("  [crawl] " + host + ":" + std::to_string(port) + ": " +
+                  std::to_string(crawl.pages.size()) + " page(s), " +
+                  std::to_string(crawl.forms.size()) + " form(s), " +
+                  std::to_string(crawl.param_urls.size()) +
+                  " parameterized URL(s)");
+    ActiveProbeConfig apc;
+    apc.max_requests = cfg.crawl_max_requests;
+    for (auto& f : check_crawled_app(fetch, crawl, host, port, apc))
+        collector.add_finding(std::move(f));
+}
+
+} // namespace
 
 ScanEngine::ScanEngine(const ScanConfig& cfg)
     : cfg_(cfg),
@@ -165,6 +197,10 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
                                                   timeout, cfg_.user_agent))
                     collector_.add_finding(std::move(f));
 
+                if (!cfg_.no_crawl)
+                    crawl_and_assess(tls, job.host, job.port, cfg_, timeout,
+                                     "https", collector_);
+
                 ctx.service = "https";
                 ctx.has_http = true;
                 ctx.http_status = resp->status;
@@ -208,6 +244,10 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
                  check_http_methods(client, job.host, job.port, timeout,
                                     cfg_.user_agent))
                 collector_.add_finding(std::move(f));
+
+            if (!cfg_.no_crawl)
+                crawl_and_assess(client, job.host, job.port, cfg_, timeout,
+                                 "http", collector_);
 
             ctx.has_http = true;
             ctx.http_status = resp->status;

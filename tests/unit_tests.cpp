@@ -2,14 +2,17 @@
 #include <doctest/doctest.h>
 
 #include "sleipnir/checks.hpp"
+#include "sleipnir/crawler.hpp"
 #include "sleipnir/http_client.hpp"
 #include "sleipnir/cve_db.hpp"
 #include "sleipnir/fuzz.hpp"
 #include "sleipnir/targets.hpp"
 #include "sleipnir/version.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <map>
 
 using namespace sln;
 
@@ -214,6 +217,204 @@ TEST_CASE("web app probe classifiers are strict") {
     CHECK_FALSE(
         graphql_introspection_reply("{\"errors\":[{\"message\":\"GET query"
                                     " missing.\"}]}"));
+}
+
+TEST_CASE("html link and form extraction") {
+    const std::string html =
+        "<a href='/docs/guide.html'>Guide</a>"
+        "<A HREF=\"/contact\">Contact</A>"
+        "<a href=\"javascript:void(0)\">noop</a>"
+        "<a href='#top'>anchor</a>"
+        "<a href='mailto:x@y.z'>mail</a>"
+        "<a href=\"https://other.example.org/away\">out</a>"
+        "<img src='x.png'>"
+        "<a href=blog/post.php?month=5>unquoted</a>";
+
+    auto links = extract_links(html);
+    // raw extraction: every href comes back, unusable ones are filtered by
+    // resolve_url at crawl time
+    REQUIRE(links.size() == 7);
+    CHECK(links[0] == "/docs/guide.html");
+    CHECK(links[1] == "/contact");
+    CHECK(links[5] == "https://other.example.org/away");
+    CHECK(links[6] == "blog/post.php?month=5");
+    // unusable schemes/fragments are dropped during resolution
+    CHECK(resolve_url("/", links[2]).empty()); // javascript:
+    CHECK(resolve_url("/", links[3]).empty()); // #frag
+    CHECK(resolve_url("/", links[4]).empty()); // mailto:
+}
+
+TEST_CASE("url resolution handles relative and dot segments") {
+    CHECK(resolve_url("/a/b/c.html", "d.html") == "/a/b/d.html");
+    CHECK(resolve_url("/a/b/c.html", "../x/y") == "/a/x/y");
+    CHECK(resolve_url("/a/b/", "c") == "/a/b/c");
+    CHECK(resolve_url("/a/b/c.html", "/root.html") == "/root.html");
+    CHECK(resolve_url("/a/b/c.html", "?tab=2") == "/a/b/c.html?tab=2");
+    CHECK(resolve_url("/a/b/c.html", "/x/../y") == "/y");
+    CHECK(resolve_url("/a/", "javascript:alert(1)").empty());
+    CHECK(resolve_url("/a/", "#frag").empty());
+    CHECK(resolve_url("/a/", "mailto:a@b.c").empty());
+    // absolute URLs pass through for the caller's scope check
+    CHECK(resolve_url("/a/", "https://x.example/p") == "https://x.example/p");
+}
+
+TEST_CASE("form extraction finds fields and CSRF tokens") {
+    const std::string html =
+        "<form action='/login' method='POST'>"
+        "<input type='text' name='user'>"
+        "<input type='password' name='pass'>"
+        "<input type='hidden' name='csrf_token' value='abc'>"
+        "<button>Go</button></form>"
+        "<form action='/comment'>"
+        "<input name='body'>"
+        "</form>"
+        "<form action='/search' method='get'>"
+        "<select name='cat'><option>1</option></select>"
+        "</form>";
+
+    auto forms = extract_forms(html);
+    REQUIRE(forms.size() == 3);
+
+    CHECK(forms[0].method == "POST");
+    CHECK(forms[0].action == "/login");
+    CHECK(forms[0].fields.size() == 3);
+    CHECK(forms[0].has_csrf_token);
+
+    CHECK(forms[1].method == "GET"); // default
+    CHECK(forms[1].fields.size() == 1);
+    CHECK_FALSE(forms[1].has_csrf_token);
+
+    CHECK(forms[2].fields.size() == 1);
+    CHECK(forms[2].fields[0].first == "cat");
+}
+
+TEST_CASE("crawler maps a site graph within scope and depth") {
+    std::map<std::string, HttpResponse> pages;
+    auto body = [](std::string b) {
+        HttpResponse r;
+        r.status = 200;
+        r.body = std::move(b);
+        r.headers["content-type"] = "text/html";
+        return r;
+    };
+    pages["/"] = body(
+        "<a href='/a'>A</a><a href='/missing'>M</a>"
+        "<a href='https://external.example.org/x'>Out</a>"
+        "<form action='/login' method='POST'><input name='user'>"
+        "<input name='pass'></form>"
+        "<form action='/search' method='GET'><input name='q'></form>");
+    pages["/a"] = body("<a href='/b'>B</a>");
+    pages["/b"] = body("<a href='/deep/x'>Deep</a>");
+    pages["/deep/x"] = body("<a href='/never'>N</a>"); // depth 3 > max_depth 2
+    pages["/login"] = body("login page");
+    pages["/search?q="] = body("results");
+
+    HttpFetcher fetch = [&](const std::string& p) -> std::optional<HttpResponse> {
+        auto it = pages.find(p);
+        return it == pages.end() ? std::nullopt : std::optional(it->second);
+    };
+
+    CrawlConfig cfg;
+    cfg.max_pages = 20;
+    cfg.max_depth = 2;
+    cfg.scheme = "http";
+    cfg.host = "testhost";
+    cfg.port = 80;
+    auto r = crawl_site(fetch, "/", cfg);
+
+    auto has_page = [&](const std::string& p) {
+        return std::find(r.pages.begin(), r.pages.end(), p) != r.pages.end();
+    };
+    CHECK(has_page("/"));
+    CHECK(has_page("/a"));
+    CHECK(has_page("/b"));
+    CHECK_FALSE(has_page("/deep/x")); // beyond depth
+    CHECK_FALSE(has_page("/never"));
+
+    // external absolute link skipped, both forms captured (GET form also
+    // becomes a parameterized URL for the probe budget)
+    REQUIRE(r.forms.size() == 2);
+    CHECK(r.forms[0].method == "POST");
+    CHECK(r.forms[0].action_path == "/login");
+    CHECK_FALSE(r.forms[0].has_csrf_token);
+
+    bool has_search = false;
+    for (const auto& u : r.param_urls)
+        if (u.rfind("/search", 0) == 0) has_search = true;
+    CHECK(has_search);
+}
+
+TEST_CASE("active web probes report xss, csrf and traversal") {
+    std::map<std::string, HttpResponse> pages;
+    auto mk = [](std::string b, const char* ctype = "text/html",
+                 int status = 200) {
+        HttpResponse r;
+        r.status = status;
+        r.body = std::move(b);
+        r.headers["content-type"] = ctype;
+        return r;
+    };
+    // raw reflection -> XSS finding
+    pages["/search?q="] = mk("Results for: <b>INPUT</b>");
+    // encoded reflection -> no finding
+    pages["/safe?q="] = mk("Results for: &lt;svg/onload=alert(1)&gt;");
+    // JSON endpoint reflecting -> no finding (not an HTML context)
+    pages["/api/search?q="] = mk("{\"q\":\"INPUT\"}", "application/json");
+    // traversal marker
+    pages["/profile?page="] = mk("root:x:0:0:0:root:/root:/bin/bash");
+    // open redirect
+    {
+        HttpResponse r = mk("", "text/plain", 302);
+        r.headers["location"] = "https://sln-open-redirect-probe.invalid/";
+        pages["/redirect?to="] = r;
+    }
+
+    CrawlResult crawl;
+    crawl.param_urls = {"/search?q=hello", "/safe?q=x", "/api/search?q=x",
+                        "/profile?page=1", "/redirect?to=%2Fhome"};
+    crawl.forms = {CrawlForm{"/login", "POST",
+                             {{"user", ""}, {"pass", ""}}, false},
+                   CrawlForm{"/logout", "POST", {{"csrf", "x"}}, true}};
+
+    HttpFetcher fetch = [&](const std::string& p) -> std::optional<HttpResponse> {
+        // substitute the probe payload so the reflection sites match
+        std::string key = p;
+        if (key.find("/search?") == 0)
+            return pages["/search?q="].body.find("INPUT") != std::string::npos
+                       ? mk("Results for: <b>" + p + "</b>")
+                       : pages["/search?q="];
+        if (key.find("/safe?") == 0) return pages["/safe?q="];
+        if (key.find("/api/search?") == 0) return pages["/api/search?q="];
+        if (key.find("/profile?") == 0) return pages["/profile?page="];
+        if (key.find("/redirect?") == 0) return pages["/redirect?to="];
+        auto it = pages.find(key);
+        return it == pages.end() ? std::nullopt : std::optional(it->second);
+    };
+
+    ActiveProbeConfig apc;
+    apc.max_requests = 50;
+    auto out = check_crawled_app(fetch, crawl, "h", 80, apc);
+
+    bool has_xss = false, has_csrf = false, has_traversal = false,
+         has_redirect = false, no_false_xss = true;
+    for (const auto& f : out) {
+        if (f.title.find("Reflected input in HTML context") == 0 &&
+            f.port == 80 && f.evidence.find("/search") != std::string::npos)
+            has_xss = true;
+        if (f.title.find("Reflected") == 0 &&
+            f.evidence.find("/safe") != std::string::npos)
+            no_false_xss = false;
+        if (f.title == "POST form without CSRF protection") has_csrf = true;
+        if (f.title == "Possible path traversal in file parameter")
+            has_traversal = true;
+        if (f.title == "Open redirect in navigation parameter")
+            has_redirect = true;
+    }
+    CHECK(has_xss);
+    CHECK(no_false_xss);
+    CHECK(has_csrf);
+    CHECK(has_traversal);
+    CHECK(has_redirect);
 }
 
 TEST_CASE("http response header keys are lowercased for lookup") {

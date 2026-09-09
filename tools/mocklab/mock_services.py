@@ -404,6 +404,84 @@ class SpaHandler(BaseHTTPRequestHandler):
         pass
 
 
+class VulnWebHandler(BaseHTTPRequestHandler):
+    """A tiny deliberately vulnerable web app for the crawler:
+    reflected XSS in /search, POST /login without a CSRF token,
+    path traversal in /profile?page and an open redirect /redirect?to."""
+
+    server_version = "vulnweb/1.0"
+
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        params = dict(
+            kv.split("=", 1) for kv in query.split("&") if "=" in kv
+        )
+        if path == "/":
+            body = (
+                b"<!DOCTYPE html><html><head><title>VulnWeb</title></head><body>"
+                b"<h1>VulnWeb</h1>"
+                b"<a href='/search?q=hello'>Search</a><br>"
+                b"<a href='/profile?page=welcome'>Profile</a><br>"
+                b"<a href='/redirect?to=%2Fhome'>Home via redirect</a><br>"
+                b"<a href='https://example.org/external'>External link</a>"
+                b"<form action='/login' method='POST'>"
+                b"<input name='user'><input type='password' name='pass'>"
+                b"<button>Login</button></form>"
+                b"<form action='/comment' method='POST'>"
+                b"<input type='hidden' name='csrf_token' value='t123'>"
+                b"<input name='text'><button>Comment</button></form>"
+                b"</body></html>"
+            )
+            self._send(200, body, "text/html")
+        elif path == "/search":
+            # reflects the q parameter unencoded (XSS)
+            q = params.get("q", "")
+            body = (
+                b"<html><body><h1>Results for: " + q.encode() + b"</h1>"
+                b"<p>nothing found</p></body></html>"
+            )
+            self._send(200, body, "text/html")
+        elif path == "/profile":
+            page = params.get("page", "welcome")
+            if "../" in page:
+                body = (
+                    b"<html><body><pre>root:x:0:0:root:/root:/bin/bash\n"
+                    b"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin</pre>"
+                    b"</body></html>"
+                )
+                self._send(200, body, "text/html")
+            else:
+                self._send(200, b"<html><body>Profile page</body></html>",
+                           "text/html")
+        elif path == "/redirect":
+            self.send_response(302)
+            self.send_header("Location", params.get("to", "/"))
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        if length:
+            self.rfile.read(length)
+        if self.path == "/login":
+            self._send(200, b"<html><body>Welcome back!</body></html>",
+                       "text/html")
+        else:
+            self._send(200, b"ok", "text/plain")
+
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
 SERVICES = [
     ("ssh", 2201, SshHandler),
     ("ftp-vuln", 2101, FtpHandler),
@@ -417,6 +495,7 @@ SERVICES = [
     ("docker-api", 2375, DockerApiHandler, LabHTTPServer),
     ("wordpress", 8081, WordPressHandler, LabHTTPServer),
     ("spa", 8082, SpaHandler, LabHTTPServer),
+    ("vulnweb", 8083, VulnWebHandler, LabHTTPServer),
 ]
 
 
