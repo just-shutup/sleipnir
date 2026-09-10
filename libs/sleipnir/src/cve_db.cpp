@@ -65,6 +65,50 @@ Severity severity_from_cvss(double cvss) {
     return Severity::Info;
 }
 
+std::string strip(std::string s) {
+    size_t b = s.find_first_not_of(" \t");
+    if (b == std::string::npos) return "";
+    size_t e = s.find_last_not_of(" \t");
+    return s.substr(b, e - b + 1);
+}
+
+// Parses a "check" block: {"probes": [{method, path, body, content_type,
+// headers: ["Name: value"], markers: [...], not_markers: [...]}]}. A
+// malformed check degrades to nullopt (finding stays potential) instead of
+// rejecting the whole database.
+std::shared_ptr<const VulnCheck> parse_check(const json& j) {
+    if (!j.contains("probes") || !j["probes"].is_array() ||
+        j["probes"].empty())
+        return nullptr;
+
+    auto check = std::make_shared<VulnCheck>();
+    for (const auto& pj : j["probes"]) {
+        VulnCheckProbe p;
+        p.path = pj.value("path", "");
+        if (p.path.empty()) return nullptr;
+        if (pj.contains("markers") && pj["markers"].is_array())
+            for (const auto& m : pj["markers"])
+                p.markers.push_back(m.get<std::string>());
+        if (p.markers.empty()) return nullptr;
+        p.method = pj.value("method", ""); // empty -> inferred by the executor
+        p.body = pj.value("body", "");
+        p.content_type = pj.value("content_type", "");
+        if (pj.contains("headers") && pj["headers"].is_array())
+            for (const auto& h : pj["headers"]) {
+                std::string hs = h.get<std::string>();
+                size_t colon = hs.find(':');
+                if (colon == std::string::npos) return nullptr;
+                p.headers.push_back({strip(hs.substr(0, colon)),
+                                     strip(hs.substr(colon + 1))});
+            }
+        if (pj.contains("not_markers") && pj["not_markers"].is_array())
+            for (const auto& m : pj["not_markers"])
+                p.not_markers.push_back(m.get<std::string>());
+        check->probes.push_back(std::move(p));
+    }
+    return check;
+}
+
 VulnEntry parse_vuln(const json& j) {
     VulnEntry e;
     e.cve = j.at("cve").get<std::string>();
@@ -74,6 +118,7 @@ VulnEntry parse_vuln(const json& j) {
     e.severity = j.contains("severity")
                      ? severity_from_string(j["severity"].get<std::string>())
                      : severity_from_cvss(e.cvss);
+    if (j.contains("check")) e.check = parse_check(j["check"]);
     return e;
 }
 
@@ -138,6 +183,11 @@ std::vector<Finding> CveDb::match(const std::string& host, uint16_t port,
                          " matches " + v.constraint;
             f.cve = v.cve;
             f.source = "cve-db";
+            // Version match only: a potential suspicion until the record's
+            // active check (if any) proves it.
+            f.verified = false;
+            f.confidence = "potential";
+            f.check = v.check;
             out.push_back(std::move(f));
         }
     }

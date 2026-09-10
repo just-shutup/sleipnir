@@ -159,8 +159,15 @@
         },
         {
           "service": "http",
-          "regex": "Grafana\\s+v?([\\d]+\\.[\\d.]+)|\"buildInfo\".*\"version\":\"([\\d.]+)\"",
-          "product": "Grafana"
+          "regex": "Grafana\\s+v?([\\d]+\\.[\\d.]+)",
+          "product": "Grafana",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "\"buildInfo\".*\"version\":\"([\\d.]+)\"",
+          "product": "Grafana",
+          "version_group": 1
         },
         {
           "service": "http",

@@ -5,6 +5,7 @@
 
 #include "sleipnir/types.hpp"
 
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,9 @@ struct VulnEntry {
     double cvss = 0.0;
     Severity severity = Severity::Info;
     std::string summary;
+    // Active verification probes from the record's "check" block (nullopt =
+    // version-matching only, findings stay "potential").
+    std::shared_ptr<const VulnCheck> check;
 };
 
 struct ProductEntry {

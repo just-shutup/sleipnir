@@ -30,6 +30,16 @@ struct HttpResponse {
 // Decodes a chunked transfer-coded payload into the original content.
 std::string decode_chunked(const std::string& in);
 
+// Extra request options for http_request_ex: custom headers, a request body
+// (verification probes need POST payloads) and a User-Agent override (the
+// Log4Shell canary travels in the User-Agent header).
+struct HttpOptions {
+    std::vector<std::pair<std::string, std::string>> headers; // extra headers
+    std::string body;             // non-empty -> sent with Content-Length
+    std::string content_type = "application/x-www-form-urlencoded";
+    std::string user_agent;       // empty -> caller's default
+};
+
 namespace detail {
 
 inline std::string ascii_lower(std::string s) {
@@ -40,8 +50,7 @@ inline std::string ascii_lower(std::string s) {
 
 // Parses a raw HTTP/1.x response (status line, headers, body incl. chunked
 // decoding). Returns nullopt when the bytes are not parseable as HTTP.
-inline std::optional<HttpResponse> parse_response(std::string raw) {
-    if (raw.empty()) return std::nullopt;
+inline std::optional<HttpResponse> parse_response(std::string raw) {    if (raw.empty()) return std::nullopt;
 
     HttpResponse resp;
     size_t line_end = raw.find("\r\n");
@@ -99,17 +108,29 @@ std::optional<HttpResponse> http_request_impl(Stream& stream,
                                               uint16_t port,
                                               const std::string& path,
                                               int timeout_ms,
-                                              const std::string& user_agent) {
+                                              const std::string& user_agent,
+                                              const HttpOptions& opts = {}) {
     if (!stream.connect(host, port, timeout_ms)) return std::nullopt;
 
     std::string host_header =
         host + ((port == 80) ? "" : ":" + std::to_string(port));
+    std::string ua = opts.user_agent.empty() ? user_agent : opts.user_agent;
     std::string req = method + " " + (path.empty() ? "/" : path) +
                       " HTTP/1.1\r\n"
                       "Host: " + host_header + "\r\n"
-                      "User-Agent: " + user_agent + "\r\n"
+                      "User-Agent: " + ua + "\r\n"
                       "Accept: */*\r\n"
-                      "Connection: close\r\n\r\n";
+                      "Connection: close\r\n";
+    for (const auto& [name, value] : opts.headers)
+        req += name + ": " + value + "\r\n";
+    if (!opts.body.empty()) {
+        req += "Content-Type: " +
+               (opts.content_type.empty() ? "application/x-www-form-urlencoded"
+                                          : opts.content_type) + "\r\n";
+        req += "Content-Length: " + std::to_string(opts.body.size()) + "\r\n";
+    }
+    req += "\r\n";
+    req += opts.body;
 
     // The server closes the connection after answering (Connection: close),
     // so recv until EOF captures the entire message.
@@ -147,6 +168,16 @@ std::optional<HttpResponse> http_request(
     const std::string& user_agent = "Sleipnir/0.1 (vulnerability scanner)") {
     return detail::http_request_impl(stream, method, host, port, path,
                                      timeout_ms, user_agent);
+}
+
+// Full-control request with body and extra headers (verification probes).
+template <typename Stream>
+std::optional<HttpResponse> http_request_ex(
+    Stream& stream, const std::string& method, const std::string& host,
+    uint16_t port, const std::string& path, int timeout_ms,
+    const std::string& user_agent, const HttpOptions& opts = {}) {
+    return detail::http_request_impl(stream, method, host, port, path,
+                                     timeout_ms, user_agent, opts);
 }
 
 } // namespace sln

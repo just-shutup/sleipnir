@@ -58,6 +58,9 @@ json finding_to_json(const Finding& f) {
     if (!f.evidence.empty()) j["evidence"] = f.evidence;
     if (!f.cve.empty()) j["cve"] = f.cve;
     j["source"] = f.source;
+    // Verification status: actively demonstrated vs. signature suspicion.
+    j["verified"] = f.verified;
+    if (!f.confidence.empty()) j["confidence"] = f.confidence;
     return j;
 }
 
@@ -123,7 +126,15 @@ void print_console_report(const ResultCollector& results,
                       << severity_name(f.severity) << C_RESET
                       << severity_color(f.severity) << "]" << C_RESET << " "
                       << f.title << "  " << C_DIM << "(" << f.host << ":"
-                      << f.port << ", " << f.source << ")" << C_RESET << "\n";
+                      << f.port << ", " << f.source;
+            // Verification status: actively demonstrated beats version
+            // suspicion; unmarked findings are plain observations.
+            if (f.verified)
+                std::cout << ", " << C_GREEN << "verified" << C_RESET << C_DIM;
+            else if (f.confidence == "potential")
+                std::cout << ", " << C_YELLOW << "potential" << C_RESET
+                          << C_DIM;
+            std::cout << ")" << C_RESET << "\n";
             if (!f.cve.empty())
                 std::cout << "         " << f.cve << "\n";
             if (!f.evidence.empty())
@@ -154,7 +165,8 @@ bool write_json_report(const std::string& path,
           {"threads", cfg.threads},
           {"timeout_ms", cfg.timeout_ms},
           {"fuzz", cfg.fuzz},
-          {"plugins_disabled", cfg.disable_plugins}}}};
+          {"plugins_disabled", cfg.disable_plugins},
+          {"verify", !cfg.no_verify}}}};
     std::set<std::string> unique_hosts;
     for (const auto& p : ports) unique_hosts.insert(p.host);
     report["stats"] = {
@@ -262,6 +274,9 @@ bool write_html_report(const std::string& path,
 
     std::map<Severity, int> by_sev;
     for (const auto& f : sorted) ++by_sev[f.severity];
+    int verified_count = 0;
+    for (const auto& f : sorted)
+        if (f.verified) ++verified_count;
 
     std::set<std::string> unique_hosts;
     for (const auto& p : ports) unique_hosts.insert(p.host);
@@ -285,6 +300,9 @@ bool write_html_report(const std::string& path,
             ".badge{display:inline-block;padding:2px 10px;border-radius:10px;font-size:11px;font-weight:600;color:#fff;text-transform:uppercase}\n"
             ".badge.info{background:#0ea5e9}.badge.low{background:#22c55e}.badge.medium{background:#f59e0b}\n"
             ".badge.high{background:#ef4444}.badge.critical{background:#7f1d1d}\n"
+            ".vtag{display:inline-block;padding:1px 8px;border-radius:9px;font-size:11px;font-weight:600}\n"
+            ".vtag.confirmed{background:#dcfce7;color:#166534}\n"
+            ".vtag.potential{background:#fef3c7;color:#92400e}\n"
             ".evi{color:#64748b;font-size:12px;margin-top:2px;word-break:break-all}\n"
             "footer{color:#829ab1;font-size:12px;padding:0 40px 28px}\n"
             "</style>\n</head>\n<body>\n";
@@ -302,6 +320,7 @@ bool write_html_report(const std::string& path,
     card(static_cast<int>(unique_hosts.size()), "Hosts");
     card(static_cast<int>(stats.open_ports.load()), "Open ports");
     card(static_cast<int>(sorted.size()), "Findings");
+    card(verified_count, "Verified");
     card(by_sev[Severity::Critical], "Critical");
     card(by_sev[Severity::High], "High");
     card(by_sev[Severity::Medium], "Medium");
@@ -313,7 +332,8 @@ bool write_html_report(const std::string& path,
         html << "<p>No findings.</p>\n";
     } else {
         html << "<table><tr><th>Severity</th><th>Location</th><th>Title"
-             << "</th><th>Source</th><th>Description</th></tr>\n";
+             << "</th><th>Confidence</th><th>Source</th>"
+                "<th>Description</th></tr>\n";
         for (const auto& f : sorted) {
             html << "<tr><td><span class=\"badge " << severity_css_class(f.severity)
                  << "\">" << severity_name(f.severity) << "</span></td>"
@@ -321,6 +341,13 @@ bool write_html_report(const std::string& path,
                  << "<td>" << html_escape(f.title);
             if (!f.cve.empty())
                 html << "<div class=\"evi\">" << html_escape(f.cve) << "</div>";
+            html << "</td><td>";
+            if (f.verified)
+                html << "<span class=\"vtag confirmed\">confirmed</span>";
+            else if (f.confidence == "potential")
+                html << "<span class=\"vtag potential\">potential</span>";
+            else
+                html << "&mdash;";
             html << "</td>"
                  << "<td>" << html_escape(f.source) << "</td>"
                  << "<td>" << html_escape(f.description);
@@ -363,8 +390,10 @@ bool write_html_report(const std::string& path,
          << ", threads " << cfg.threads << ", timeout " << cfg.timeout_ms
          << "ms, fuzz " << (cfg.fuzz ? "on" : "off") << ", safe mode "
          << (cfg.safe ? "on" : "off") << ", TLS checks "
-         << (cfg.no_tls ? "off" : "on")
-         << ". Generated by an authorized vulnerability assessment; "
+         << (cfg.no_tls ? "off" : "on") << ", active verification "
+         << (cfg.no_verify ? "off" : "on")
+         << ". Verified = actively demonstrated; potential = version/signature"
+            " suspicion. Generated by an authorized vulnerability assessment; "
             "interpret findings in context.</footer>\n";
 
     html << "</body>\n</html>\n";

@@ -14,6 +14,7 @@ add_library(sleipnir STATIC
     src/crawler.cpp
     src/plugins.cpp
     src/fuzz.cpp
+    src/verify.cpp
     src/engine.cpp
     src/report.cpp
 )

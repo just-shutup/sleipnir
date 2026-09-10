@@ -5,6 +5,7 @@
 #include "sleipnir/syn_scan.hpp"
 #include "sleipnir/targets.hpp"
 #include "sleipnir/udp_scan.hpp"
+#include "sleipnir/verify.hpp"
 
 #include <asio.hpp>
 
@@ -36,6 +37,14 @@ void crawl_and_assess(Stream& stream, const std::string& host, uint16_t port,
     HttpFetcher fetch = [&](const std::string& path) {
         return http_get(stream, host, port, path, timeout, cfg.user_agent);
     };
+    HttpPostFetcher post = [&](const std::string& path, const std::string& body,
+                               const std::string& ctype) {
+        HttpOptions opts;
+        opts.body = body;
+        opts.content_type = ctype;
+        return http_request_ex(stream, "POST", host, port, path, timeout,
+                               cfg.user_agent, opts);
+    };
     auto crawl = crawl_site(fetch, "/", cc);
     collector.log("  [crawl] " + host + ":" + std::to_string(port) + ": " +
                   std::to_string(crawl.pages.size()) + " page(s), " +
@@ -44,8 +53,40 @@ void crawl_and_assess(Stream& stream, const std::string& host, uint16_t port,
                   " parameterized URL(s)");
     ActiveProbeConfig apc;
     apc.max_requests = cfg.crawl_max_requests;
-    for (auto& f : check_crawled_app(fetch, crawl, host, port, apc))
+    apc.allow_post = !cfg.safe;
+    for (auto& f : check_crawled_app(fetch, post, crawl, host, port, apc))
         collector.add_finding(std::move(f));
+}
+
+// Adds version-matched CVE findings without running their checks (no HTTP
+// transport available) — they stay "potential".
+void flush_unverified(std::vector<Finding>& pending,
+                      ResultCollector& collector) {
+    for (auto& f : pending) collector.add_finding(std::move(f));
+    pending.clear();
+}
+
+// Verification stage over an HTTP transport: the universal Log4Shell canary
+// plus every CVE record's active check. A marker in a response upgrades the
+// finding from potential to confirmed with probe evidence.
+template <typename Stream>
+void verification_stage(Stream& stream, const ScanConfig& cfg,
+                        const std::string& host, uint16_t port, int timeout,
+                        std::vector<Finding>& pending,
+                        ResultCollector& collector) {
+    if (cfg.no_verify) {
+        flush_unverified(pending, collector);
+        return;
+    }
+    ProbeFetcher fetch = probe_fetcher(stream, host, port, timeout,
+                                       cfg.user_agent);
+    if (auto f = check_log4shell(fetch, host, port, canary_token()))
+        collector.add_finding(std::move(*f));
+    for (auto& f : pending) {
+        if (f.check) verify_finding(fetch, f, !cfg.safe);
+        collector.add_finding(std::move(f));
+    }
+    pending.clear();
 }
 
 } // namespace
@@ -149,11 +190,13 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                                          result.version) +
                               ")"));
 
-    // 2. CVE matching from the identified product/version
+    // 2. CVE matching from the identified product/version. Findings with an
+    // active check are buffered until we know whether an HTTP transport can
+    // verify them; everything else is re-added below.
+    std::vector<Finding> pending_cve;
     if (!result.product.empty()) {
-        for (auto& f :
-             cves_.match(job.host, job.port, result.product, result.version))
-            collector_.add_finding(std::move(f));
+        pending_cve = cves_.match(job.host, job.port, result.product,
+                                  result.version);
     }
 
     // Cleartext credential exposure: telnet carries logins unencrypted.
@@ -201,9 +244,11 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                                                       timeout))
                 collector_.add_finding(std::move(f));
 
+            bool http_ok = false;
             if (auto resp =
                     http_get(tls, job.host, job.port, "/", timeout,
                              cfg_.user_agent)) {
+                http_ok = true;
                 result.http_status = resp->status;
                 result.http_headers = resp->headers;
 
@@ -212,14 +257,15 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                 for (const auto& [product, version] : root.tech_stack) {
                     for (auto& f : cves_.match(job.host, job.port, product,
                                                version))
-                        collector_.add_finding(std::move(f));
+                        pending_cve.push_back(std::move(f));
                 }
 
                 for (auto& f : check_sensitive_paths(tls, job.host, job.port,
                                                      timeout, cfg_.user_agent))
                     collector_.add_finding(std::move(f));
                 for (auto& f : check_webapp_probes(tls, job.host, job.port,
-                                                   timeout, cfg_.user_agent))
+                                                   timeout, cfg_.user_agent,
+                                                   !cfg_.safe))
                     collector_.add_finding(std::move(f));
                 for (auto& f : check_http_methods(tls, job.host, job.port,
                                                   timeout, cfg_.user_agent))
@@ -237,6 +283,14 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                 plugins_.on_http_response(ctx, io, timeout, collector_);
             }
             plugins_.on_service(ctx, io, timeout, collector_);
+
+            // Active CVE verification over the TLS transport.
+            if (http_ok)
+                verification_stage(tls, cfg_, job.host, job.port, timeout,
+                                   pending_cve, collector_);
+            else
+                flush_unverified(pending_cve, collector_);
+
             collector_.add_port(std::move(result));
             return 0;
         }
@@ -245,10 +299,12 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 #endif
 
     // 3b. plain HTTP pipeline
+    bool http_ok = false;
     if (result.service == "http") {
         client.close();
         if (auto resp = http_get(client, job.host, job.port, "/", timeout,
                                  cfg_.user_agent)) {
+            http_ok = true;
             result.http_status = resp->status;
             result.http_headers = resp->headers;
 
@@ -257,7 +313,7 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
             for (const auto& [product, version] : root.tech_stack) {
                 for (auto& f :
                      cves_.match(job.host, job.port, product, version))
-                    collector_.add_finding(std::move(f));
+                    pending_cve.push_back(std::move(f));
             }
 
             for (auto& f :
@@ -266,7 +322,7 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                 collector_.add_finding(std::move(f));
             for (auto& f :
                  check_webapp_probes(client, job.host, job.port, timeout,
-                                     cfg_.user_agent))
+                                     cfg_.user_agent, !cfg_.safe))
                 collector_.add_finding(std::move(f));
             for (auto& f :
                  check_http_methods(client, job.host, job.port, timeout,
@@ -305,6 +361,14 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
     // 4. hooks that want the final picture
     plugins_.on_service(ctx, io, timeout, collector_);
+
+    // Active CVE verification: over HTTP the buffered findings can be proven
+    // by their checks; without HTTP they stay version-matched suspicions.
+    if (http_ok)
+        verification_stage(client, cfg_, job.host, job.port, timeout,
+                           pending_cve, collector_);
+    else
+        flush_unverified(pending_cve, collector_);
 
     // 5. robustness fuzzing (own stand only!)
     if (cfg_.fuzz) {

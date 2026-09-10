@@ -24,6 +24,9 @@ Finding make_finding(const std::string& host, uint16_t port,
     f.description = description;
     f.evidence = evidence;
     f.source = "tls";
+    // TLS findings come from observed handshakes and certificates.
+    f.verified = true;
+    f.confidence = "confirmed";
     return f;
 }
 

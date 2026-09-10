@@ -7,12 +7,47 @@ Every listener emulates a real service badly enough to trip the scanner:
   127.0.0.1:2101  FTP        vsftpd 2.3.4                  -> CVE-2011-2523
   127.0.0.1:2102  FTP        vsftpd 3.0.2, anonymous login allowed
   127.0.0.1:8080  HTTP       Server: Apache/2.4.49, root dir listing,
-                             exposed /.git/HEAD and /.env  -> CVE-2021-41773
-  127.0.0.1:8443  HTTPS      same Apache 2.4.49 web app over TLS with a
-                             self-signed, almost-expired certificate whose
-                             CN (mock.lab) does not match the scan target
-  127.0.0.1:8081  WordPress  WordPress 5.8.1 on PHP 7.2.24 behind nginx
-                             1.18.0, REST user enumeration, CORS reflection
+                             exposed /.git/HEAD and /.env, and the
+                             single-encoded .%2e traversal is open
+                             -> CVE-2021-41773 CONFIRMED by active check
+  127.0.0.1:8443  HTTPS      Apache/2.4.50 over TLS (self-signed, almost
+                             expired cert, CN mismatch): .%2e is blocked
+                             but the double-encoded .%%32%65 bypass works
+                             -> CVE-2021-42013 CONFIRMED over the TLS
+                             transport
+  127.0.0.1:8081  WordPress  WordPress 5.8.1 on PHP/5.4.1 behind nginx
+                             1.18.0, REST user enumeration, CORS reflection;
+                             php-cgi runs query-string switches -> ?-s dumps
+                             highlighted source
+                             -> CVE-2012-1823 CONFIRMED by active check
+  127.0.0.1:8082  SPA        GraphQL introspection, actuator, OpenAPI, SQL
+                             errors; the Java backend evaluates JNDI
+                             expressions from request headers
+                             -> Log4Shell canary CONFIRMED
+  127.0.0.1:8083  VulnWeb    reflected XSS, CSRF-less POST /login, path
+                             traversal /profile?page, open redirect
+                             /redirect?to, template evaluation /render?tpl
+                             (SSTI), server-side fetch /fetch?url (SSRF,
+                             stays "potential"), external-entity XML on
+                             POST /comment (XXE)
+  127.0.0.1:8084  Apache-hardened  Apache/2.4.49 with traversal locked
+                             down: version still matches CVE-2021-41773,
+                             the check fails -> stays "potential"
+                             (negative stand)
+  127.0.0.1:8085  PHP-hardened    same WordPress/PHP/5.4.1 stack, php-cgi
+                             query-string flaw patched: ?-s renders the
+                             page -> CVE-2012-1823 stays "potential"
+                             (negative stand)
+  127.0.0.1:8086  Grafana-hardened  Grafana v8.3.0, plugin route traversal
+                             fixed -> CVE-2021-43798 stays "potential"
+                             (negative stand)
+  127.0.0.1:8087  Webmin-hardened  MiniServ/1.910, password_change.cgi
+                             rejects unauthenticated calls -> CVE-2019-15107
+                             stays "potential" (negative stand)
+  127.0.0.1:8088  Grafana     Grafana v8.3.0, /public/plugins/..%2f
+                             traversal open -> CVE-2021-43798 CONFIRMED
+  127.0.0.1:8089  Webmin     MiniServ/1.910, password_change.cgi runs the
+                             injected command -> CVE-2019-15107 CONFIRMED
   127.0.0.1:6380  Redis      unauthenticated Redis 6.0.16   -> CVE-2022-0543
   127.0.0.1:2375  Docker     Docker Engine API without TLS/auth (root-equivalent)
   127.0.0.1:2501  SMTP       Postfix banner, accepts any RCPT (open relay),
@@ -29,11 +64,13 @@ Every listener emulates a real service badly enough to trip the scanner:
 
 Usage:  python3 tools/mocklab/mock_services.py
 Then:   ./build/apps/sleipnir/sleipnir scan 127.0.0.1 \
-            -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8443
+            -p 2101,2102,2201,2375,2501,2502,2503,6380,8080-8089,8443
         ./build/apps/sleipnir/sleipnir scan 127.0.0.1 -p 1900 --udp \
             --udp-ports 1900,5353,11211,161
 """
 
+import html
+import re
 import socket
 import socketserver
 import ssl
@@ -42,8 +79,17 @@ import tempfile
 import threading
 import os
 from http.server import BaseHTTPRequestHandler
+from urllib.parse import unquote, urlsplit
 
 HOST = "127.0.0.1"
+
+# /etc/passwd served by every intentionally traversal-vulnerable handler
+PASSWD_BODY = (
+    b"root:x:0:0:root:/root:/bin/bash\n"
+    b"daemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+    b"bin:x:2:2:bin:/bin:/usr/sbin/nologin\n"
+    b"sys:x:3:3:sys:/dev:/usr/sbin/nologin\n"
+)
 
 
 class BannerHandler(socketserver.BaseRequestHandler):
@@ -187,9 +233,26 @@ class LabHTTPServer(socketserver.ThreadingTCPServer):
 class LabHTTPRequestHandler(BaseHTTPRequestHandler):
     server_version = "Apache/2.4.49 (Unix)"  # deliberately old -> CVE-2021-41773
     protocol_version = "HTTP/1.1"
+    # which URL-encoded traversal this build still falls for:
+    #   "single" -> CVE-2021-41773 (.%2e), "double" -> CVE-2021-42013
+    #   (.%%32%65), None -> patched/hardened
+    traversal_vuln = "single"
 
     def do_GET(self):
         path = self.path.split("?")[0]
+        low = self.path.lower()
+        if any(p in low for p in (".%2e", "%2e%2e", "..%2f", "..%5c",
+                                  "%%32%65")):
+            # traversal territory: CVE-2021-41773 / CVE-2021-42013
+            if (self.traversal_vuln == "single" and
+                    any(p in low for p in (".%2e", "%2e%2e", "..%2f",
+                                           "..%5c"))):
+                self._send(200, PASSWD_BODY)
+            elif self.traversal_vuln == "double" and "%%32%65" in low:
+                self._send(200, PASSWD_BODY)
+            else:
+                self._send(404, b"Not Found")
+            return
         if path == "/":
             body = (
                 "<html><head><title>Index of /</title></head><body>"
@@ -219,6 +282,34 @@ class LabHTTPRequestHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):  # silence request logging
         pass
+
+
+class ApacheDoubleTraversalHandler(LabHTTPRequestHandler):
+    """Apache 2.4.50: the .%2e fix is incomplete, the double-encoded
+    .%%32%65 bypass (CVE-2021-42013) still escapes the document root."""
+
+    server_version = "Apache/2.4.50 (Unix)"
+    traversal_vuln = "double"
+
+
+class ApacheHardenedHandler(LabHTTPRequestHandler):
+    """Apache 2.4.49 with the traversal backported/hardened (negative
+    stand): the version still matches CVE-2021-41773 but every traversal
+    path is rejected, so the active check must fail."""
+
+    traversal_vuln = None
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        low = self.path.lower()
+        if any(p in low for p in (".%2e", "%2e%2e", "..%2f", "..%5c",
+                                  "%%32%65")):
+            self._send(403, b"Forbidden")
+            return
+        if path == "/":
+            self._send(200, b"<html><body><h1>It works!</h1></body></html>")
+        else:
+            self._send(404, b"Not Found")
 
 
 class RedisLabHandler(socketserver.StreamRequestHandler):
@@ -293,13 +384,28 @@ class DockerApiHandler(BaseHTTPRequestHandler):
 
 
 class WordPressHandler(BaseHTTPRequestHandler):
-    """A WordPress 5.8.1 on PHP 7.2.24 behind nginx 1.18.0: every component
-    has a known CVE, and the REST API leaks user logins."""
+    """A WordPress 5.8.1 on PHP/5.4.1 behind nginx 1.18.0: every component
+    has a known CVE, the REST API leaks user logins, and php-cgi executes
+    query-string switches (CVE-2012-1823): ?-s dumps highlighted source."""
 
     server_version = "nginx/1.18.0"
+    php_version = "PHP/5.4.1"
+    php_cgi_vulnerable = True
 
     def do_GET(self):
-        path = self.path.split("?")[0]
+        path, _, query = self.path.partition("?")
+        # CVE-2012-1823: php-cgi treats the query string as CLI switches;
+        # -s prints the script source with syntax highlighting.
+        if self.php_cgi_vulnerable and query.strip() in ("-s", "-s&"):
+            body = (
+                b'<code><span style="color: #000000">\n'
+                b'<span style="color: #0000BB">&lt;?php\n'
+                b"/* mocked php-cgi source disclosure (CVE-2012-1823) */\n"
+                b'echo "WordPress mock";\n'
+                b"</span>\n</code>"
+            )
+            self._send(200, body)
+            return
         if path == "/":
             body = (
                 b"<!DOCTYPE html><html><head>"
@@ -310,7 +416,7 @@ class WordPressHandler(BaseHTTPRequestHandler):
             )
             self.send_response(200)
             self.send_header("Content-Type", "text/html")
-            self.send_header("X-Powered-By", "PHP/7.2.24")
+            self.send_header("X-Powered-By", self.php_version)
             # deliberately reflects any Origin (CORS misconfiguration)
             origin = self.headers.get("Origin")
             if origin:
@@ -331,7 +437,7 @@ class WordPressHandler(BaseHTTPRequestHandler):
     def _send(self, code, body):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
-        self.send_header("X-Powered-By", "PHP/7.2.24")
+        self.send_header("X-Powered-By", self.php_version)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -340,14 +446,44 @@ class WordPressHandler(BaseHTTPRequestHandler):
         pass
 
 
+class PhpCgiHardenedHandler(WordPressHandler):
+    """The same WordPress/PHP/5.4.1 stack with the php-cgi query-string
+    flaw patched (negative stand): ?-s renders the page, never the source,
+    so the CVE-2012-1823 check must fail and the finding stays potential."""
+
+    php_cgi_vulnerable = False
+
+
 class SpaHandler(BaseHTTPRequestHandler):
     """A generic JS-SPA backend: GraphQL with introspection, Spring-style
-    actuator, OpenAPI docs, a shipped package.json and a search endpoint
-    that breaks on quotes."""
+    actuator, OpenAPI docs, a shipped package.json, a search endpoint that
+    breaks on quotes — and a Java backend that evaluates JNDI expressions
+    from request headers (Log4Shell, CVE-2021-44228)."""
 
     server_version = "mock-spa"
 
+    def _log4shell_hit(self):
+        """A ${jndi:...} expression in User-Agent/Referer/X-Api-Version is
+        evaluated: the naming lookup fails and the error names the canary
+        host (without echoing the raw expression)."""
+        for h in ("User-Agent", "Referer", "X-Api-Version"):
+            v = self.headers.get(h) or ""
+            m = re.search(r"\$\{jndi:(?:dns|ldap|rmi|iiop)://([^/}\s]+)", v)
+            if m:
+                host = m.group(1)
+                body = (
+                    "HTTP 500 Internal Server Error\n\n"
+                    "javax.naming.CommunicationException: " + host +
+                    " [Root exception is java.net.UnknownHostException: " +
+                    host + "]"
+                ).encode()
+                self._send(500, body, "text/plain")
+                return True
+        return False
+
     def do_GET(self):
+        if self._log4shell_hit():
+            return
         path, _, query = self.path.partition("?")
         if path == "/":
             body = (
@@ -414,7 +550,10 @@ class SpaHandler(BaseHTTPRequestHandler):
 class VulnWebHandler(BaseHTTPRequestHandler):
     """A tiny deliberately vulnerable web app for the crawler:
     reflected XSS in /search, POST /login without a CSRF token,
-    path traversal in /profile?page and an open redirect /redirect?to."""
+    path traversal in /profile?page, an open redirect /redirect?to,
+    a template engine behind /render?tpl (SSTI), a server-side fetch
+    in /fetch?url (SSRF, only provable out-of-band -> stays potential)
+    and an XML API on POST /comment that resolves external entities (XXE)."""
 
     server_version = "vulnweb/1.0"
 
@@ -430,6 +569,9 @@ class VulnWebHandler(BaseHTTPRequestHandler):
                 b"<a href='/search?q=hello'>Search</a><br>"
                 b"<a href='/profile?page=welcome'>Profile</a><br>"
                 b"<a href='/redirect?to=%2Fhome'>Home via redirect</a><br>"
+                b"<a href='/render?tpl=Welcome'>Render</a><br>"
+                b"<a href='/fetch?url=http%3A%2F%2Fexample.test%2Ffeed'>"
+                b"Fetch feed</a><br>"
                 b"<a href='https://example.org/external'>External link</a>"
                 b"<form action='/login' method='POST'>"
                 b"<input name='user'><input type='password' name='pass'>"
@@ -448,6 +590,35 @@ class VulnWebHandler(BaseHTTPRequestHandler):
                 b"<p>nothing found</p></body></html>"
             )
             self._send(200, body, "text/html")
+        elif path == "/render":
+            # server-side template engine: evaluates the tpl parameter
+            tpl = unquote(params.get("tpl", ""))
+            if "{{7*'7'}}" in tpl:
+                result = "7777777"  # Jinja2/Twig-style string arithmetic
+            elif "SLEIPNSTI${7*7}SLEIPNSTI" in tpl:
+                result = "SLEIPNSTI49SLEIPNSTI"  # Freemarker/Mako style
+            else:
+                result = html.escape(tpl)  # plain values pass through safely
+            body = ("<html><body><h1>Rendered: " + result +
+                    "</h1></body></html>").encode()
+            self._send(200, body, "text/html")
+        elif path == "/fetch":
+            # server-side fetch: any host is attempted, none resolve in the
+            # lab -> the error names the requested host (SSRF evidence)
+            target = unquote(params.get("url", ""))
+            try:
+                parsed = urlsplit(target)
+            except ValueError:
+                parsed = None
+            if parsed and parsed.scheme in ("http", "https") and parsed.hostname:
+                body = ("<html><body><h1>Fetch failed</h1>"
+                        "<p>Proxy error: could not resolve host " +
+                        parsed.hostname + "</p></body></html>").encode()
+                self._send(502, body, "text/html")
+            else:
+                self._send(400,
+                           b"<html><body><p>Invalid URL</p></body></html>",
+                           "text/html")
         elif path == "/profile":
             page = params.get("page", "welcome")
             if "../" in page:
@@ -470,9 +641,19 @@ class VulnWebHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
-        if length:
-            self.rfile.read(length)
-        if self.path == "/login":
+        body = self.rfile.read(length) if length else b""
+        path = self.path.split("?")[0]
+        if path == "/comment":
+            # XML API with a parser that resolves external entities (XXE):
+            # the entity content comes back in-band
+            if b"<!ENTITY" in body and b"file:///" in body:
+                self._send(200,
+                           b"<response><data>" + PASSWD_BODY +
+                           b"</data></response>", "application/xml")
+            else:
+                self._send(200, b"<response><data>stored</data></response>",
+                           "application/xml")
+        elif path == "/login":
             self._send(200, b"<html><body>Welcome back!</body></html>",
                        "text/html")
         else:
@@ -487,6 +668,122 @@ class VulnWebHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt, *args):
         pass
+
+
+# ---------------------------------------------------------------------------
+# Verification-stage stands: Grafana (CVE-2021-43798) and Webmin
+# (CVE-2019-15107), each in a vulnerable and a hardened variant.
+# ---------------------------------------------------------------------------
+
+GRAFANA_LOGIN = (
+    b"<!DOCTYPE html><html><head><title>Grafana</title></head><body>"
+    b"<div class='login-form'><h3>Welcome to Grafana</h3>"
+    b"<form action='/login' method='POST'>"
+    b"<input name='user'><input type='password' name='password'>"
+    b"<button>Log in</button></form></div>"
+    b"<footer>Grafana v8.3.0</footer></body></html>"
+)
+
+
+class GrafanaHandler(BaseHTTPRequestHandler):
+    """Grafana 8.3.0: the /public/plugins/<plugin>/..%2f path traversal
+    (CVE-2021-43798) serves files outside the plugin directory."""
+
+    traversal_vulnerable = True
+
+    def version_string(self):
+        return ""  # real Grafana sends no Server header
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path in ("/", "/login"):
+            self._send(200, GRAFANA_LOGIN, "text/html")
+        elif path.startswith("/public/plugins/"):
+            if self.traversal_vulnerable and "..%2f" in self.path.lower():
+                self._send(200, PASSWD_BODY, "text/plain")
+            else:
+                self._send(404, b'{"message":"Not found"}',
+                           "application/json")
+        else:
+            self._send(404, b'{"message":"Not found"}', "application/json")
+
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class GrafanaHardenedHandler(GrafanaHandler):
+    """Grafana 8.3.0 with the plugin route fixed (negative stand): the
+    version still matches CVE-2021-43798 but the traversal 404s."""
+
+    traversal_vulnerable = False
+
+
+class WebminHandler(BaseHTTPRequestHandler):
+    """Webmin 1.910 behind MiniServ: password_change.cgi runs the command
+    injected into the 'old' parameter before authentication
+    (CVE-2019-15107). The injected 'cat /etc/passwd' is read-only."""
+
+    injectable = True
+
+    def version_string(self):
+        return "MiniServ/1.910"
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/":
+            body = (
+                b"<!DOCTYPE html><html><head><title>Login to Webmin</title>"
+                b"</head><body><h1>Webmin</h1>"
+                b"<form action='/session_login.cgi' method='POST'>"
+                b"<input name='user'><input type='password' name='pass'>"
+                b"<button>Login</button></form></body></html>"
+            )
+            self._send(200, body, "text/html")
+        else:
+            self._send(404, b"Error - Document not found", "text/plain")
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length else b""
+        path = self.path.split("?")[0]
+        if path == "/password_change.cgi" and self.injectable:
+            decoded = unquote(body.decode("latin-1", "replace"))
+            if "cat /etc/passwd" in decoded:
+                # command injection: the injected command's output comes
+                # back inside the password-change error page
+                page = (b"<html><body><h3>Password change failed</h3>"
+                        b"<pre>" + PASSWD_BODY + b"</pre></body></html>")
+                self._send(200, page, "text/html")
+                return
+            self._send(401, b"<html><body>Incorrect password</body></html>",
+                       "text/html")
+        else:
+            self._send(401, b"<html><body>Authorization required</body>"
+                            b"</html>", "text/html")
+
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class WebminHardenedHandler(WebminHandler):
+    """Webmin 1.910 with password_change.cgi hardened (negative stand):
+    unauthenticated callers get a 401, the injection never runs."""
+
+    injectable = False
 
 
 # ---------------------------------------------------------------------------
@@ -557,7 +854,7 @@ SERVICES = [
     ("ftp-vuln", 2101, FtpHandler),
     ("ftp-anon", 2102, FtpAnonHandler),
     ("http", 8080, LabHTTPRequestHandler, LabHTTPServer),
-    ("https", 8443, LabHTTPRequestHandler, LabHTTPServer),
+    ("https", 8443, ApacheDoubleTraversalHandler, LabHTTPServer),
     ("smtp-relay", 2501, SmtpRelayHandler),
     ("smtp-strict", 2502, SmtpStrictHandler),
     ("crashy-echo", 2503, EchoCrashHandler, CrashyTCPServer),
@@ -566,6 +863,15 @@ SERVICES = [
     ("wordpress", 8081, WordPressHandler, LabHTTPServer),
     ("spa", 8082, SpaHandler, LabHTTPServer),
     ("vulnweb", 8083, VulnWebHandler, LabHTTPServer),
+    # verification-stage negative stands: versions match the CVE records,
+    # the active checks fail -> findings must stay "potential"
+    ("apache-hardened", 8084, ApacheHardenedHandler, LabHTTPServer),
+    ("php-hardened", 8085, PhpCgiHardenedHandler, LabHTTPServer),
+    ("grafana-hardened", 8086, GrafanaHardenedHandler, LabHTTPServer),
+    ("webmin-hardened", 8087, WebminHardenedHandler, LabHTTPServer),
+    # verification-stage positive stands
+    ("grafana-vuln", 8088, GrafanaHandler, LabHTTPServer),
+    ("webmin-vuln", 8089, WebminHandler, LabHTTPServer),
 ]
 
 class Ipv6TcpServer(socketserver.ThreadingTCPServer):

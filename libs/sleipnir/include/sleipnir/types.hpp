@@ -3,6 +3,7 @@
 
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -67,6 +68,28 @@ struct PortResult {
     std::optional<TlsInfo> tls; // present for endpoints inspected over TLS
 };
 
+// One active verification probe of a CVE record's "check" block: a single
+// HTTP request whose response is searched for confirmation markers. The
+// payloads only make a vulnerable target return the markers, so a hit is
+// proof, not a version suspicion.
+struct VulnCheckProbe {
+    std::string method; // empty -> GET (or POST when a body is present)
+    std::string path;
+    std::string body;         // non-empty -> sent as request body
+    std::string content_type; // default "application/x-www-form-urlencoded" with a body
+    std::vector<std::pair<std::string, std::string>> headers; // extra headers
+    std::vector<std::string> markers;     // confirmation: any-of, case-sensitive
+    std::vector<std::string> not_markers; // must ALL be absent (anti-reflection)
+};
+
+// Data-driven active check attached to a CVE record (cve_map.json "check").
+// The database stays plain data: new verifications need no recompilation.
+struct VulnCheck {
+    std::vector<VulnCheckProbe> probes;
+
+    bool empty() const { return probes.empty(); }
+};
+
 struct Finding {
     std::string host;
     uint16_t port = 0;
@@ -76,6 +99,14 @@ struct Finding {
     std::string evidence;   // snippet proving the issue
     std::string cve;        // empty when not CVE-backed
     std::string source;     // "cve-db" | "builtin" | "tls" | "plugin:<name>" | "fuzz"
+    // Verification status. verified=true means the scanner actively
+    // demonstrated the issue (a marker only a vulnerable target produces);
+    // false = signature/version-based suspicion. confidence: "confirmed" or
+    // "potential" (empty = plain observation, neither).
+    bool verified = false;
+    std::string confidence;
+    // Active check to run against the endpoint, when the CVE record has one.
+    std::shared_ptr<const VulnCheck> check;
 };
 
 struct ScanConfig {
@@ -117,6 +148,11 @@ struct ScanConfig {
     int crawl_depth = 3;         // link depth from the start page
     int crawl_max_pages = 40;    // page fetch budget per HTTP port
     int crawl_max_requests = 120; // active probe budget (XSS, traversal, ...)
+
+    // Active CVE verification (--no-verify disables): each CVE record with a
+    // "check" block gets its probes executed and the finding upgraded from
+    // potential to confirmed when a marker returns.
+    bool no_verify = false;
 
     // CI gate (--fail-on SEVERITY): empty -> disabled.
     std::string fail_on;

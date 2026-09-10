@@ -275,6 +275,11 @@ std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
                      "Active web probe budget (XSS, traversal, redirects)")
         ->capture_default_str();
 
+    // Active CVE verification
+    scan->add_flag("--no-verify", cfg.no_verify,
+                   "Disable active CVE verification (Log4Shell canary, "
+                   "CVE-record probes); findings stay 'potential'");
+
     // CI gate
     scan->add_option("--fail-on", cfg.fail_on,
                      "Exit with code 3 when findings reach SEVERITY "
@@ -350,6 +355,7 @@ void show_settings(const sln::ScanConfig& cfg) {
               << "fuzz           : " << (cfg.fuzz ? "on" : "off") << "\n"
               << "fuzz_max_len   : " << cfg.fuzz_max_len << "\n"
               << "fuzz_delay_ms  : " << cfg.fuzz_delay_ms << "\n"
+              << "verify         : " << (cfg.no_verify ? "off" : "on") << "\n"
               << "plugins        : "
               << (cfg.disable_plugins ? "disabled" : cfg.plugins_dir) << "\n"
               << "data_dir       : " << cfg.data_dir << "\n"

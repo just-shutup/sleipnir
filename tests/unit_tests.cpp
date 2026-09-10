@@ -10,6 +10,7 @@
 #include "sleipnir/targets.hpp"
 #include "sleipnir/types.hpp"
 #include "sleipnir/udp_scan.hpp"
+#include "sleipnir/verify.hpp"
 #include "sleipnir/version.hpp"
 
 #include <algorithm>
@@ -599,4 +600,565 @@ TEST_CASE("UDP reply classification") {
     // empty reply and ports with no expectations
     CHECK(udp_classify(53, "").empty());
     CHECK(udp_classify(8080, "whatever").empty());
+}
+
+// ---------------------------------------------------------------------------
+// Active verification stage (--no-verify / --safe gating)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// Transport double: records the raw request, answers with a canned reply.
+struct FakeStream {
+    std::string request_sent;
+    std::string response;
+    bool connect_ok = true;
+    int connects = 0;
+
+    bool connect(const std::string&, uint16_t, int) {
+        ++connects;
+        return connect_ok;
+    }
+    std::string send_and_receive(const std::string& payload, int, size_t) {
+        request_sent = payload;
+        return response;
+    }
+};
+
+std::string raw_response(int status, const std::string& body) {
+    return "HTTP/1.1 " + std::to_string(status) + " X\r\n"
+           "Content-Length: " + std::to_string(body.size()) + "\r\n"
+           "\r\n" + body;
+}
+
+HttpResponse mk_response(std::string body, int status = 200) {
+    HttpResponse r;
+    r.status = status;
+    r.body = std::move(body);
+    r.headers["content-type"] = "text/html";
+    return r;
+}
+
+VulnCheck simple_check() {
+    VulnCheckProbe p;
+    p.path = "/icons/.%2e/etc/passwd";
+    p.markers = {"root:x:0:0:", "root:*:0:0:"};
+    VulnCheck c;
+    c.probes.push_back(std::move(p));
+    return c;
+}
+
+ProbeFetcher constant_fetch(HttpResponse resp) {
+    return [r = std::move(resp)](const std::string&, const std::string&,
+                                 const std::string&, const std::string&,
+                                 const std::vector<std::pair<std::string, std::string>>&,
+                                 const std::string&) -> std::optional<HttpResponse> {
+        return r;
+    };
+}
+
+} // namespace
+
+TEST_CASE("run_vuln_check confirms only on marker evidence") {
+    const auto check = simple_check();
+
+    // positive: response contains the marker
+    auto ok = constant_fetch(mk_response("root:x:0:0:root:/root:/bin/bash"));
+    auto ev = run_vuln_check(ok, check, true);
+    REQUIRE(ev);
+    CHECK(ev->find("GET /icons/.%2e/etc/passwd") != std::string::npos);
+    CHECK(ev->find("root:x:0:0:") != std::string::npos);
+
+    // negative: no marker in the response
+    auto plain = constant_fetch(mk_response("<html>Not Found</html>", 404));
+    CHECK_FALSE(run_vuln_check(plain, check, true));
+
+    // negative: transport failure
+    ProbeFetcher dead = [](const std::string&, const std::string&,
+                           const std::string&, const std::string&,
+                           const std::vector<std::pair<std::string, std::string>>&,
+                           const std::string&) -> std::optional<HttpResponse> {
+        return std::nullopt;
+    };
+    CHECK_FALSE(run_vuln_check(dead, check, true));
+
+    // multi-probe: the second probe confirms when the first misses
+    VulnCheck two;
+    VulnCheckProbe p1, p2;
+    p1.path = "/a";
+    p1.markers = {"marker-a"};
+    p2.path = "/b";
+    p2.markers = {"marker-b"};
+    two.probes = {p1, p2};
+    int calls = 0;
+    ProbeFetcher second_hits = [&](const std::string&, const std::string& path,
+                                   const std::string&, const std::string&,
+                                   const std::vector<std::pair<std::string, std::string>>&,
+                                   const std::string&) {
+        ++calls;
+        return path == "/b" ? mk_response("hit marker-b") : mk_response("nope");
+    };
+    auto ev2 = run_vuln_check(second_hits, two, true);
+    REQUIRE(ev2);
+    CHECK(ev2->find("GET /b") != std::string::npos);
+    CHECK(calls == 2);
+}
+
+TEST_CASE("run_vuln_check anti-reflection and safe gating") {
+    // not_markers: a raw echo of the payload is not evidence
+    VulnCheck check;
+    VulnCheckProbe p;
+    p.path = "/render";
+    p.markers = {"7777777"};
+    p.not_markers = {"{{7*'7'}}"};
+    check.probes = {p};
+
+    auto echoed = constant_fetch(mk_response("you wrote {{7*'7'}}"));
+    CHECK_FALSE(run_vuln_check(echoed, check, true));
+    auto evaluated = constant_fetch(mk_response("result: 7777777"));
+    CHECK(run_vuln_check(evaluated, check, true));
+
+    // --safe: POST probes (body or explicit method) are never sent
+    VulnCheck post;
+    VulnCheckProbe body_probe, method_probe;
+    body_probe.path = "/password_change.cgi";
+    body_probe.body = "user=root&old=x%3B%20cat%20%2Fetc%2Fpasswd";
+    body_probe.markers = {"root:x:0:0:"};
+    method_probe.method = "POST";
+    method_probe.path = "/eval";
+    method_probe.markers = {"marker"};
+    post.probes = {body_probe, method_probe};
+
+    int calls = 0;
+    ProbeFetcher counting = [&](const std::string&, const std::string&,
+                                const std::string&, const std::string&,
+                                const std::vector<std::pair<std::string, std::string>>&,
+                                const std::string&) {
+        ++calls;
+        return mk_response("root:x:0:0:root:/root:/bin/bash");
+    };
+    CHECK_FALSE(run_vuln_check(counting, post, false));
+    CHECK(calls == 0); // nothing was sent at all
+    CHECK(run_vuln_check(counting, post, true));
+    CHECK(calls == 1); // the first probe confirms, the second never runs
+
+    // GET probes always run, safe or not
+    VulnCheck get_check = simple_check();
+    int get_calls = 0;
+    ProbeFetcher get_counter = [&](const std::string&, const std::string&,
+                                   const std::string&, const std::string&,
+                                   const std::vector<std::pair<std::string, std::string>>&,
+                                   const std::string&) {
+        ++get_calls;
+        return mk_response("root:x:0:0:root:/root:/bin/bash");
+    };
+    CHECK(run_vuln_check(get_counter, get_check, false));
+    CHECK(get_calls >= 1);
+}
+
+TEST_CASE("verify_finding upgrades potential to confirmed with evidence") {
+    Finding f;
+    f.title = "Apache path traversal (CVE-2021-41773)";
+    f.severity = Severity::Critical;
+    f.cve = "CVE-2021-41773";
+    f.confidence = "potential";
+    f.check = std::make_shared<const VulnCheck>(simple_check());
+
+    auto ok = constant_fetch(mk_response("root:x:0:0:root:/root:/bin/bash"));
+    CHECK(verify_finding(ok, f, true));
+    CHECK(f.verified);
+    CHECK(f.confidence == "confirmed");
+    CHECK(f.evidence.find("root:x:0:0:") != std::string::npos);
+
+    // failed check: the finding keeps its potential status untouched
+    Finding g;
+    g.title = f.title;
+    g.cve = "CVE-2021-41773";
+    g.confidence = "potential";
+    g.check = f.check;
+    auto plain = constant_fetch(mk_response("Not Found", 404));
+    CHECK_FALSE(verify_finding(plain, g, true));
+    CHECK_FALSE(g.verified);
+    CHECK(g.confidence == "potential");
+
+    // no check attached: nothing to run
+    Finding h = g;
+    h.check = nullptr;
+    CHECK_FALSE(verify_finding(ok, h, true));
+    CHECK_FALSE(h.verified);
+}
+
+TEST_CASE("log4shell canary requires evaluation proof, not raw echo") {
+    const std::string token = canary_token();
+    CHECK(token.size() == 12);
+
+    // positive: the lookup failed and the failure names the canary host
+    auto naming_error = constant_fetch(mk_response(
+        "HTTP 500 Internal Server Error\n\n"
+        "javax.naming.CommunicationException: sln-l4s-" + token +
+        ".invalid [Root exception is java.net.UnknownHostException: "
+        "sln-l4s-" + token + ".invalid]"));
+    auto f = check_log4shell(naming_error, "h", 80, token);
+    REQUIRE(f);
+    CHECK(f->cve == "CVE-2021-44228");
+    CHECK(f->severity == Severity::Critical);
+    CHECK(f->verified);
+    CHECK(f->confidence == "confirmed");
+    CHECK(f->evidence.find(token) != std::string::npos);
+
+    // negative: plain echo of the payload proves nothing
+    auto echoed = constant_fetch(mk_response(
+        "you sent ${jndi:dns://sln-l4s-" + token + ".invalid/s}"));
+    CHECK_FALSE(check_log4shell(echoed, "h", 80, token));
+
+    // negative: the canary host is never mentioned
+    auto silent = constant_fetch(mk_response("<html>hello</html>"));
+    CHECK_FALSE(check_log4shell(silent, "h", 80, token));
+
+    // the canary travels in User-Agent and X-Api-Version headers
+    std::string seen_ua, seen_header;
+    ProbeFetcher recorder = [&](const std::string&, const std::string&,
+                                const std::string&, const std::string&,
+                                const std::vector<std::pair<std::string, std::string>>& hdrs,
+                                const std::string& ua) {
+        seen_ua = ua;
+        for (const auto& [n, v] : hdrs)
+            if (n == "X-Api-Version") seen_header = v;
+        return mk_response("nothing");
+    };
+    check_log4shell(recorder, "h", 80, token);
+    CHECK(seen_ua.find("${jndi:dns://sln-l4s-" + token + ".invalid") !=
+          std::string::npos);
+    CHECK(seen_header.find("${jndi:") != std::string::npos);
+}
+
+TEST_CASE("cve database parses check blocks and degrades on garbage") {
+    const char* path = "/tmp/sleipnir_test_cve_check.json";
+    {
+        std::ofstream out(path);
+        out << R"({
+            "testprod": {
+                "product": "TestProd",
+                "aliases": ["testprod", "aliasprod"],
+                "vulns": [
+                    {
+                        "cve": "CVE-1000-0001", "affected": "<2.0", "cvss": 9.0,
+                        "check": {
+                            "probes": [
+                                {
+                                    "method": "POST",
+                                    "path": "/password_change.cgi",
+                                    "body": "user=root&old=x",
+                                    "markers": ["root:x:0:0:"],
+                                    "not_markers": ["echo"],
+                                    "headers": ["X-Test: 1"]
+                                }
+                            ]
+                        }
+                    },
+                    {"cve": "CVE-1000-0002", "affected": "<2.0", "cvss": 5.0,
+                     "check": {"probes": [{"path": "/x"}]}},
+                    {"cve": "CVE-1000-0003", "affected": "<2.0", "cvss": 5.0,
+                     "check": {"probes": []}}
+                ]
+            }
+        })";
+    }
+    auto db = CveDb::load(path);
+    std::remove(path);
+
+    auto findings = db.match("h", 1, "TestProd", "1.0");
+    REQUIRE(findings.size() == 3);
+    for (const auto& f : findings) {
+        // version-matched findings are potential until actively verified
+        CHECK_FALSE(f.verified);
+        CHECK(f.confidence == "potential");
+        if (f.cve == "CVE-1000-0001") {
+            REQUIRE(f.check);
+            REQUIRE(f.check->probes.size() == 1);
+            const auto& p = f.check->probes[0];
+            CHECK(p.method == "POST");
+            CHECK(p.path == "/password_change.cgi");
+            CHECK(p.body == "user=root&old=x");
+            REQUIRE(p.markers.size() == 1);
+            CHECK(p.markers[0] == "root:x:0:0:");
+            REQUIRE(p.not_markers.size() == 1);
+            CHECK(p.not_markers[0] == "echo");
+            REQUIRE(p.headers.size() == 1);
+            CHECK(p.headers[0].first == "X-Test");
+            CHECK(p.headers[0].second == "1");
+        } else {
+            // a probe without markers is unusable -> the check is dropped
+            // and the finding stays a version-only suspicion
+            CHECK(f.check == nullptr);
+        }
+    }
+
+    // alias lookup keeps the check
+    auto aliased = db.match("h", 1, "aliasprod", "1.0");
+    REQUIRE(aliased.size() == 3);
+    CHECK(aliased[0].check != nullptr);
+}
+
+TEST_CASE("shipped cve_map carries active checks for the big five") {
+    auto load = [] {
+        std::ifstream a("data/cve_map.json");
+        if (a.good()) return CveDb::load("data/cve_map.json");
+        return CveDb::load("tests/data/cve_map.json");
+    };
+    auto db = load();
+
+    struct CveCase {
+        const char* product;
+        const char* version;
+        const char* cve;
+        bool post_probe;
+    };
+    const CveCase cases[] = {
+        {"Apache", "2.4.49", "CVE-2021-41773", false},
+        {"Apache", "2.4.50", "CVE-2021-42013", false},
+        {"PHP", "5.4.1", "CVE-2012-1823", false},
+        {"Grafana", "8.3.0", "CVE-2021-43798", false},
+        {"Webmin", "1.910", "CVE-2019-15107", true},
+        {"MiniServ", "1.910", "CVE-2019-15107", true}, // alias
+    };
+    for (const auto& c : cases) {
+        auto findings = db.match("h", 1, c.product, c.version);
+        bool found = false;
+        for (const auto& f : findings) {
+            if (f.cve != c.cve) continue;
+            REQUIRE(f.check);
+            REQUIRE_FALSE(f.check->probes.empty());
+            bool has_probe = false, is_post = false;
+            for (const auto& p : f.check->probes) {
+                if (p.path.empty() || p.markers.empty()) continue;
+                has_probe = true;
+                if (p.method == "POST" || !p.body.empty()) is_post = true;
+            }
+            CHECK(has_probe);
+            CHECK(is_post == c.post_probe);
+            CHECK_FALSE(f.verified);
+            CHECK(f.confidence == "potential");
+            found = true;
+        }
+        CHECK(found);
+    }
+
+    // records without a check block stay version-matching only
+    auto ssh = db.match("h", 22, "OpenSSH", "7.2p2");
+    REQUIRE_FALSE(ssh.empty());
+    CHECK(ssh[0].check == nullptr);
+}
+
+TEST_CASE("http_request_ex sends bodies, headers and UA overrides") {
+    FakeStream s;
+    s.response = raw_response(200, "ok");
+    HttpOptions opts;
+    opts.headers = {{"X-Api-Version", "v1"}};
+    opts.body = "a=b";
+    opts.content_type = "application/xml";
+    opts.user_agent = "UA-Override";
+    auto resp = http_request_ex(s, "POST", "h", 8080, "/x", 100, "DefaultUA",
+                                opts);
+    REQUIRE(resp);
+    CHECK(resp->status == 200);
+    CHECK(resp->body == "ok");
+    CHECK(s.request_sent.rfind("POST /x HTTP/1.1\r\n", 0) == 0);
+    CHECK(s.request_sent.find("User-Agent: UA-Override") != std::string::npos);
+    CHECK(s.request_sent.find("X-Api-Version: v1") != std::string::npos);
+    CHECK(s.request_sent.find("Content-Type: application/xml") !=
+          std::string::npos);
+    CHECK(s.request_sent.find("Content-Length: 3") != std::string::npos);
+    CHECK(s.request_sent.find("\r\n\r\na=b") != std::string::npos);
+    CHECK(s.connects == 1);
+
+    // probe_fetcher wraps any transport into a ProbeFetcher with defaults
+    FakeStream s2;
+    s2.response = raw_response(200, "body");
+    auto fetch = probe_fetcher(s2, "h", 8080, 100, "DefaultUA");
+    auto r2 = fetch("GET", "/p", "", "", {}, "");
+    REQUIRE(r2);
+    CHECK(s2.request_sent.rfind("GET /p HTTP/1.1\r\n", 0) == 0);
+    CHECK(s2.request_sent.find("User-Agent: DefaultUA") != std::string::npos);
+    CHECK(s2.request_sent.find("Content-Length") == std::string::npos);
+
+    // connect failure surfaces as nullopt
+    FakeStream dead;
+    dead.connect_ok = false;
+    auto fetch2 = probe_fetcher(dead, "h", 8080, 100, "ua");
+    CHECK_FALSE(fetch2("GET", "/", "", "", {}, ""));
+}
+
+TEST_CASE("ssti probe confirms evaluated arithmetic only") {
+    CrawlResult crawl;
+    crawl.param_urls = {"/render?tpl=hello"};
+
+    // positive: the engine evaluates the payload (result in the response)
+    HttpFetcher evaluates = [](const std::string& url)
+        -> std::optional<HttpResponse> {
+        if (url.find("{{7*'7'}}") != std::string::npos)
+            return mk_response("<h1>Rendered: 7777777</h1>");
+        if (url.find("SLEIPNSTI${7*7}SLEIPNSTI") != std::string::npos)
+            return mk_response("<h1>Rendered: SLEIPNSTI49SLEIPNSTI</h1>");
+        return mk_response("<h1>Rendered: hello</h1>");
+    };
+    ActiveProbeConfig cfg;
+    cfg.max_requests = 20;
+    auto out = check_crawled_app(evaluates, crawl, "h", 80, cfg);
+    bool ssti = false;
+    for (const auto& f : out)
+        if (f.title == "Server-side template injection in parameter") {
+            ssti = true;
+            CHECK(f.verified);
+            CHECK(f.confidence == "confirmed");
+            CHECK(f.evidence.find("7777777") != std::string::npos);
+        }
+    CHECK(ssti);
+
+    // negative: raw reflection of the payload is not evaluation
+    HttpFetcher reflects = [](const std::string& url)
+        -> std::optional<HttpResponse> {
+        size_t eq = url.find("tpl=");
+        std::string v = eq == std::string::npos ? "" : url.substr(eq + 4);
+        return mk_response("<h1>Rendered: " + v + "</h1>");
+    };
+    auto out2 = check_crawled_app(reflects, crawl, "h", 80, cfg);
+    for (const auto& f : out2)
+        CHECK(f.title != "Server-side template injection in parameter");
+}
+
+TEST_CASE("ssrf canary stays potential, echoes produce nothing") {
+    CrawlResult crawl;
+    crawl.param_urls = {"/fetch?url=example.test/feed"};
+
+    // positive: the fetch attempt fails and names the canary host
+    HttpFetcher fetch_error = [](const std::string& url)
+        -> std::optional<HttpResponse> {
+        size_t p = url.find("sln-ssrf-");
+        if (p == std::string::npos)
+            return mk_response("<p>ok</p>");
+        size_t end = url.find('/', p);
+        std::string canary = url.substr(
+            p, end == std::string::npos ? std::string::npos : end - p);
+        return mk_response("Proxy error: could not resolve host " + canary,
+                           502);
+    };
+    ActiveProbeConfig cfg;
+    cfg.max_requests = 10;
+    auto out = check_crawled_app(fetch_error, crawl, "h", 80, cfg);
+    bool ssrf = false;
+    for (const auto& f : out)
+        if (f.title == "Possible server-side request forgery (SSRF)") {
+            ssrf = true;
+            // in-band evidence alone cannot confirm: no out-of-band callback
+            CHECK_FALSE(f.verified);
+            CHECK(f.confidence == "potential");
+            CHECK(f.evidence.find("sln-ssrf-") != std::string::npos);
+        }
+    CHECK(ssrf);
+
+    // negative: the canary is echoed but no fetch happened (no error text)
+    HttpFetcher echo = [](const std::string& url)
+        -> std::optional<HttpResponse> {
+        size_t p = url.find("sln-ssrf-");
+        if (p == std::string::npos) return mk_response("<p>ok</p>");
+        size_t end = url.find('/', p);
+        std::string canary = url.substr(
+            p, end == std::string::npos ? std::string::npos : end - p);
+        return mk_response("you asked for " + canary);
+    };
+    auto out2 = check_crawled_app(echo, crawl, "h", 80, cfg);
+    for (const auto& f : out2)
+        CHECK(f.title != "Possible server-side request forgery (SSRF)");
+}
+
+TEST_CASE("xxe probe confirms in-band entity resolution and gates on safe") {
+    CrawlResult crawl;
+    crawl.forms = {CrawlForm{"/comment", "POST", {{"text", ""}}, false}};
+
+    int posts = 0;
+    std::string last_ctype;
+    HttpPostFetcher vulnerable = [&](const std::string&, const std::string& body,
+                                     const std::string& ctype)
+        -> std::optional<HttpResponse> {
+        ++posts;
+        last_ctype = ctype;
+        if (body.find("<!ENTITY") != std::string::npos &&
+            body.find("file:///etc/passwd") != std::string::npos)
+            return mk_response("<response>root:x:0:0:root:/root:/bin/bash"
+                               "</response>");
+        return mk_response("<response>invalid xml</response>");
+    };
+    HttpFetcher get = [](const std::string&) -> std::optional<HttpResponse> {
+        return std::nullopt;
+    };
+
+    ActiveProbeConfig cfg;
+    cfg.max_requests = 10;
+    cfg.allow_post = true;
+    auto out = check_crawled_app(get, vulnerable, crawl, "h", 80, cfg);
+    bool xxe = false;
+    for (const auto& f : out)
+        if (f.title ==
+            "XML external entity (XXE): local file disclosure") {
+            xxe = true;
+            CHECK(f.verified);
+            CHECK(f.confidence == "confirmed");
+            CHECK(f.evidence.find("file:///etc/passwd") != std::string::npos);
+        }
+    CHECK(xxe);
+    CHECK(last_ctype == "application/xml");
+
+    // negative: the parser rejects entities
+    HttpPostFetcher strict = [&](const std::string&, const std::string&,
+                                 const std::string&)
+        -> std::optional<HttpResponse> {
+        ++posts;
+        return mk_response("<response>entity rejected</response>");
+    };
+    posts = 0;
+    auto out2 = check_crawled_app(get, strict, crawl, "h", 80, cfg);
+    for (const auto& f : out2)
+        CHECK(f.title != "XML external entity (XXE): local file disclosure");
+    CHECK(posts >= 1); // the probe ran, the target just refused
+
+    // --safe: the XXE POST is never sent
+    ActiveProbeConfig safe_cfg = cfg;
+    safe_cfg.allow_post = false;
+    posts = 0;
+    auto out3 = check_crawled_app(get, vulnerable, crawl, "h", 80, safe_cfg);
+    for (const auto& f : out3)
+        CHECK(f.title != "XML external entity (XXE): local file disclosure");
+    CHECK(posts == 0);
+}
+
+TEST_CASE("phpunit eval-stdin probe confirms and gates on safe mode") {
+    // positive: the script echoes the md5 of the marker payload
+    FakeStream s;
+    s.response = raw_response(200, "05f43fed0e82268cba041a6b303c81f7");
+    auto out = check_webapp_probes(s, "h", 80, 100, "ua", true);
+    bool found = false;
+    for (const auto& f : out)
+        if (f.title == "PHPUnit eval-stdin.php exposed (CVE-2017-9841)") {
+            found = true;
+            CHECK(f.verified);
+            CHECK(f.confidence == "confirmed");
+            CHECK(f.severity == Severity::Critical);
+        }
+    CHECK(found);
+
+    // negative: a 404 on the eval-stdin paths
+    FakeStream s2;
+    s2.response = raw_response(404, "Not Found");
+    auto out2 = check_webapp_probes(s2, "h", 80, 100, "ua", true);
+    for (const auto& f : out2)
+        CHECK(f.title != "PHPUnit eval-stdin.php exposed (CVE-2017-9841)");
+
+    // --safe: the POST probe is skipped entirely
+    FakeStream s3;
+    s3.response = raw_response(200, "05f43fed0e82268cba041a6b303c81f7");
+    auto out3 = check_webapp_probes(s3, "h", 80, 100, "ua", false);
+    for (const auto& f : out3)
+        CHECK(f.title != "PHPUnit eval-stdin.php exposed (CVE-2017-9841)");
+    CHECK(s3.request_sent.find("eval-stdin") == std::string::npos);
 }

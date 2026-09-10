@@ -4,7 +4,8 @@
 // <a href> links (staying on the target host:port), collects POST forms and
 // parameterized URLs. check_crawled_app() then probes the discovered surface
 // with bounded budgets: reflected-XSS markers, CSRF-less POST forms, path
-// traversal and open-redirect parameters.
+// traversal, open-redirect parameters, template-injection arithmetic,
+// SSRF canary URLs and XXE entities with a local file marker.
 //
 // Both halves are driven through an HttpFetcher callback so they are
 // transport-agnostic (plain TCP or TLS) and unit-testable against a fake.
@@ -70,6 +71,11 @@ struct CrawlResult {
 using HttpFetcher =
     std::function<std::optional<HttpResponse>(const std::string& path)>;
 
+// fetch_post(path, body, content_type) performs POST requests (XXE probe).
+using HttpPostFetcher = std::function<std::optional<HttpResponse>(
+    const std::string& path, const std::string& body,
+    const std::string& content_type)>;
+
 CrawlResult crawl_site(const HttpFetcher& fetch, const std::string& start_path,
                        const CrawlConfig& cfg);
 
@@ -82,10 +88,21 @@ struct ActiveProbeConfig {
     bool probe_xss = true;
     bool probe_traversal = true;
     bool probe_open_redirect = true;
+    bool probe_ssti = true;      // {{7*7}}-style template arithmetic
+    bool probe_ssrf = true;      // canary URL in fetch-like parameters
+    bool probe_xxe = true;       // external entity with a local file marker
     bool check_csrf = true;
+    bool allow_post = true;      // false in --safe: no state-changing requests
 };
 
 std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,
+                                       const CrawlResult& crawl,
+                                       const std::string& host, uint16_t port,
+                                       const ActiveProbeConfig& cfg);
+
+// Same, with a POST fetcher so the XXE probe can submit entity payloads.
+std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,
+                                       const HttpPostFetcher& post_fetch,
                                        const CrawlResult& crawl,
                                        const std::string& host, uint16_t port,
                                        const ActiveProbeConfig& cfg);

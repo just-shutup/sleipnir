@@ -81,6 +81,9 @@ Finding make_finding(const std::string& host, uint16_t port,
     f.description = description;
     f.evidence = evidence;
     f.source = "fuzz";
+    // A crash/hang was actively demonstrated against the service.
+    f.verified = true;
+    f.confidence = "confirmed";
     return f;
 }
 

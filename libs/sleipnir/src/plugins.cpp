@@ -176,6 +176,10 @@ void register_api(PluginHost::Plugin& p, sol::state& lua, sol::table& api) {
         finding.evidence = f.get_or<std::string>("evidence", "");
         finding.cve = f.get_or<std::string>("cve", "");
         finding.source = "plugin:" + p.name;
+        // A plugin finding with evidence actively demonstrated the issue;
+        // without evidence it stays an unverified suspicion.
+        finding.verified = !finding.evidence.empty();
+        finding.confidence = finding.verified ? "confirmed" : "potential";
         p.findings->push_back(std::move(finding));
     };
 

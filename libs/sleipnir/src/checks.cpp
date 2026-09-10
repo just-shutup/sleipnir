@@ -19,6 +19,9 @@ Finding make_finding(const std::string& host, uint16_t port,
     f.description = description;
     f.evidence = evidence;
     f.source = "builtin";
+    // Observed responses only — never version guesses.
+    f.verified = true;
+    f.confidence = "confirmed";
     return f;
 }
 
