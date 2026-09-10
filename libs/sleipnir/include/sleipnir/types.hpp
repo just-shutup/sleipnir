@@ -37,6 +37,7 @@ TimingProfile timing_profile(int t);
 struct TlsInfo {
     std::string protocol;    // negotiated, e.g. "TLSv1.2"
     std::string cipher;
+    std::string alpn;        // negotiated ALPN protocol, e.g. "h2" ("" = none)
     std::string subject;
     std::string issuer;
     std::string not_before;  // "YYYY-MM-DD HH:MM:SSZ"

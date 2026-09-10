@@ -196,6 +196,7 @@ bool write_json_report(const std::string& path,
             j["tls"] = {
                 {"protocol", p.tls->protocol},
                 {"cipher", p.tls->cipher},
+                {"alpn", p.tls->alpn},
                 {"subject", p.tls->subject},
                 {"issuer", p.tls->issuer},
                 {"not_before", p.tls->not_before},

@@ -16,6 +16,7 @@ add_library(sleipnir STATIC
     src/fuzz.cpp
     src/verify.cpp
     src/auth.cpp
+    src/dirb.cpp
     src/engine.cpp
     src/report.cpp
 )

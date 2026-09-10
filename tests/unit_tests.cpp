@@ -4,6 +4,7 @@
 #include "sleipnir/checks.hpp"
 #include "sleipnir/auth.hpp"
 #include "sleipnir/crawler.hpp"
+#include "sleipnir/dirb.hpp"
 #include "sleipnir/http_client.hpp"
 #include "sleipnir/cve_db.hpp"
 #include "sleipnir/fuzz.hpp"
@@ -19,6 +20,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
+#include <functional>
 #include <map>
 
 using namespace sln;
@@ -1559,8 +1561,7 @@ TEST_CASE("crawler seeds from robots.txt and sitemap") {
     CHECK(has2("/about"));
 }
 
-TEST_CASE("js endpoint extraction feeds the crawl queue") {
-    std::map<std::string, HttpResponse> pages;
+TEST_CASE("js endpoint extraction feeds the crawl queue") {    std::map<std::string, HttpResponse> pages;
     auto body = [](std::string b, const char* ct = "text/html") {
         HttpResponse r;
         r.status = 200;
@@ -1599,4 +1600,106 @@ TEST_CASE("js endpoint extraction feeds the crawl queue") {
     CHECK(has_page("/api/v1/users"));
     CHECK(has_page("/api/v1/orders"));
     CHECK(has_page("/api/legacy"));
+}
+
+// ---------------------------------------------------------------------------
+// Directory brute-force (--dirb)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("wordlist loading: built-in default and file parsing") {
+    auto builtin = builtin_wordlist();
+    CHECK(builtin.size() >= 80);
+    // canonical entries present
+    bool has_admin = false, has_git = false;
+    for (const auto& w : builtin) {
+        if (w == "admin") has_admin = true;
+        if (w == ".git") has_git = true;
+        CHECK(w.front() != '/'); // stored as segments, not absolute paths
+    }
+    CHECK(has_admin);
+    CHECK(has_git);
+
+    const char* wl = "/tmp/sleipnir_test_wordlist.txt";
+    {
+        std::ofstream f(wl);
+        f << "alpha\n"
+          << "  beta  \n"
+          << "# comment\n"
+          << "/gamma\n"   // leading slash is stripped
+          << "\n";
+    }
+    auto words = load_wordlist(wl);
+    REQUIRE(words.size() == 3);
+    CHECK(words[0] == "alpha");
+    CHECK(words[1] == "beta");
+    CHECK(words[2] == "gamma");
+    std::remove(wl);
+
+    // unreadable file -> built-in fallback
+    auto fallback = load_wordlist("/nonexistent/wordlist.txt");
+    CHECK(fallback.size() == builtin.size());
+    // empty path -> built-in
+    CHECK(load_wordlist("").size() == builtin.size());
+}
+
+TEST_CASE("dirb reports served paths, filters soft 404s and known pages") {
+    // a server that serves /admin (200) and /private (403), returns a
+    // generic "anything" 200 page for unknown paths (soft 404), 404s for
+    // /secret, and /known is pre-discovered by the crawler
+    FakeStream s;
+    s.connect_ok = true;
+    // responses are chosen by the requested path
+    auto respond = [](const std::string& req) -> std::string {
+        if (req.find("GET /admin ") != std::string::npos)
+            return raw_response(200, "<html>admin panel</html>");
+        if (req.find("GET /private ") != std::string::npos)
+            return raw_response(403, "forbidden");
+        if (req.find("GET /secret ") != std::string::npos)
+            return raw_response(404, "not found");
+        if (req.find("GET /known ") != std::string::npos)
+            return raw_response(200, "<html>known page</html>");
+        if (req.find("-sln-dirb") != std::string::npos)
+            return raw_response(200, "<html>anything at all</html>");
+        return raw_response(200, "<html>anything at all</html>");
+    };
+    // FakeStream returns one canned response; make it path-aware via a
+    // small adapter
+    struct PathAwareStream {
+        std::function<std::string(const std::string&)> responder;
+        std::string last_request;
+        bool connect(const std::string&, uint16_t, int) { return true; }
+        std::string send_and_receive(std::string_view payload, int, size_t) {
+            last_request = std::string(payload);
+            return responder(last_request);
+        }
+    };
+    PathAwareStream s2;
+    s2.responder = respond;
+
+    DirbConfig dc;
+    dc.words = {"admin", "private", "secret", "known"};
+    std::set<std::string> known = {"/known"};
+    auto out = run_dirb(s2, "h", 80, 100, "ua", dc, known);
+
+    REQUIRE(out.size() == 2);
+    bool has_admin = false, has_private = false;
+    for (const auto& f : out) {
+        CHECK(f.source == "dirb");
+        CHECK(f.verified);
+        CHECK(f.confidence == "confirmed");
+        if (f.title == "Hidden path discovered: /admin") {
+            has_admin = true;
+            CHECK(f.severity == Severity::Low);
+            CHECK(f.evidence.find("200") != std::string::npos);
+        }
+        if (f.title == "Protected path: /private") {
+            has_private = true;
+            CHECK(f.severity == Severity::Info);
+        }
+    }
+    CHECK(has_admin);
+    CHECK(has_private);
+    // /secret 404s (real 404) and /known was pre-discovered: not reported;
+    // soft-404 candidates never hit the findings because every unknown
+    // path mirrors the baseline (status 200, same body)
 }

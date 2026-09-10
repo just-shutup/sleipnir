@@ -1,6 +1,7 @@
 #include "sleipnir/engine.hpp"
 #include "sleipnir/auth.hpp"
 #include "sleipnir/crawler.hpp"
+#include "sleipnir/dirb.hpp"
 #include "sleipnir/fuzz.hpp"
 #include "sleipnir/netio.hpp"
 #include "sleipnir/syn_scan.hpp"
@@ -57,6 +58,20 @@ void crawl_and_assess(Stream& stream, const std::string& host, uint16_t port,
     apc.allow_post = !cfg.safe;
     for (auto& f : check_crawled_app(fetch, post, crawl, host, port, apc))
         collector.add_finding(std::move(f));
+
+    // Directory brute-force (--dirb): paths the site serves but nothing
+    // links to; the crawler's known pages are skipped.
+    if (cfg.dirb) {
+        DirbConfig dc;
+        dc.words = load_wordlist(cfg.wordlist_path);
+        std::set<std::string> known(crawl.pages.begin(), crawl.pages.end());
+        auto found = run_dirb(stream, host, port, timeout, cfg.user_agent,
+                              dc, known);
+        collector.log("  [dirb] " + host + ":" + std::to_string(port) + ": " +
+                      std::to_string(dc.words.size()) + " word(s), " +
+                      std::to_string(found.size()) + " path(s) found");
+        for (auto& f : found) collector.add_finding(std::move(f));
+    }
 }
 
 // Adds version-matched CVE findings without running their checks (no HTTP
@@ -305,6 +320,26 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                                                       timeout))
                 collector_.add_finding(std::move(f));
 
+            // ALPN outcome: an HTTP/2-capable endpoint negotiated h2
+            if (peer.alpn == "h2") {
+                Finding f;
+                f.host = job.host;
+                f.port = job.port;
+                f.title = "HTTP/2 supported (ALPN h2)";
+                f.severity = Severity::Info;
+                f.description =
+                    "The TLS endpoint negotiated HTTP/2 via ALPN. Modern "
+                    "protocol support is a positive posture signal; H2 "
+                    "specific attacks (request smuggling via HPACK/cleaning "
+                    "differences behind H2->H1 proxies) only matter when a "
+                    "downgrade proxy is in front.";
+                f.evidence = "ALPN negotiated: " + peer.alpn;
+                f.source = "tls";
+                f.verified = true;
+                f.confidence = "confirmed";
+                collector_.add_finding(std::move(f));
+            }
+
             // session headers ride on every HTTP request over TLS
             AuthStream<TlsClient> http(tls, session_headers);
             bool http_ok = false;
@@ -423,6 +458,20 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
             for (auto& f : check_tls_legacy_protocols(io, job.host, job.port,
                                                       timeout))
                 collector_.add_finding(std::move(f));
+            if (peer.alpn == "h2") {
+                Finding f;
+                f.host = job.host;
+                f.port = job.port;
+                f.title = "HTTP/2 supported (ALPN h2)";
+                f.severity = Severity::Info;
+                f.description =
+                    "The TLS endpoint negotiated HTTP/2 via ALPN.";
+                f.evidence = "ALPN negotiated: " + peer.alpn;
+                f.source = "tls";
+                f.verified = true;
+                f.confidence = "confirmed";
+                collector_.add_finding(std::move(f));
+            }
         }
     }
 #endif

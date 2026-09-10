@@ -98,6 +98,7 @@ TlsInfo summarize_tls(const std::string& host, const TlsPeerInfo& peer) {
     TlsInfo info;
     info.protocol = peer.protocol;
     info.cipher = peer.cipher;
+    info.alpn = peer.alpn;
     info.subject = peer.subject;
     info.issuer = peer.issuer;
     info.not_before = peer.not_before;

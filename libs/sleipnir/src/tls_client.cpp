@@ -157,6 +157,14 @@ bool TlsClient::connect(const std::string& host, uint16_t port,
     if (!is_ip_literal(host))
         SSL_set_tlsext_host_name(stream_->native_handle(), host.c_str());
 
+    // Advertise ALPN: http/1.1 plus h2. Servers that speak HTTP/2
+    // negotiate it, which the engine reports; non-ALPN servers simply
+    // ignore the extension.
+    SSL_set_alpn_protos(stream_->native_handle(),
+                        reinterpret_cast<const unsigned char*>("\x02h2"
+                                                              "\x08http/1.1"),
+                        11);
+
     // Record OpenSSL preverification without aborting the handshake.
     stream_->set_verify_callback([&](bool preverified, asio::ssl::verify_context&) {
         return true;
@@ -186,6 +194,12 @@ bool TlsClient::connect(const std::string& host, uint16_t port,
         return false;
     }
     peer_ = extract_peer(stream_->native_handle());
+    // ALPN outcome ("" when the server did not negotiate anything)
+    const unsigned char* alpn = nullptr;
+    unsigned int alpn_len = 0;
+    SSL_get0_alpn_selected(stream_->native_handle(), &alpn, &alpn_len);
+    if (alpn && alpn_len > 0)
+        peer_.alpn.assign(reinterpret_cast<const char*>(alpn), alpn_len);
     return true;
 }
 

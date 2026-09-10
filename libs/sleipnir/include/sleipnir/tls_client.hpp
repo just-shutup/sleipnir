@@ -27,6 +27,7 @@ struct TlsPeerInfo {
     bool handshake_ok = false;
     std::string protocol;      // negotiated protocol, e.g. "TLSv1.2"
     std::string cipher;        // negotiated cipher name
+    std::string alpn;          // negotiated ALPN protocol, e.g. "h2" ("" = none)
     std::string subject;
     std::string issuer;
     std::string common_name;

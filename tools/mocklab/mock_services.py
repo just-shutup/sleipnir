@@ -1092,6 +1092,15 @@ class AuthAppHandler(BaseHTTPRequestHandler):
                 b"<button>Sign in</button></form></body></html>"
             )
             self._send(200, body, "text/html")
+        elif path == "/uploads":
+            # hidden path: served (with a session), nothing links to it
+            if not self._authed():
+                self._redirect("/login")
+                return
+            self._send(200, b"<html>uploads</html>", "text/html")
+        elif path == "/adminer":
+            # protected path: 401 for everyone (dirb recon intel)
+            self._send(401, b"auth required", "text/plain")
         elif path == "/admin" or path == "/admin/dashboard":
             if not self._authed():
                 self._redirect("/login")
