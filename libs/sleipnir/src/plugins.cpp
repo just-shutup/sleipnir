@@ -202,6 +202,80 @@ void register_api(PluginHost::Plugin& p, sol::state& lua, sol::table& api) {
 
 PluginHost::~PluginHost() = default;
 
+PluginHost::ScriptCheckResult PluginHost::run_check_script(
+    const std::string& path, const std::string& host, uint16_t port,
+    asio::io_context& io, int timeout_ms, ResultCollector& out) {
+    ScriptCheckResult result;
+    std::error_code ec;
+    if (!fs::exists(path, ec)) {
+        result.error = "check script not found: " + path;
+        return result;
+    }
+
+    // A throwaway plugin state: same sandbox and API as hook plugins, but
+    // driven by the verify(ctx) entry point instead of scan hooks.
+    Plugin p;
+    p.name = fs::path(path).filename().string();
+    p.lua = std::make_unique<sol::state>();
+    sol::state& lua = *p.lua;
+    lua.open_libraries(sol::lib::base, sol::lib::string, sol::lib::table,
+                       sol::lib::math, sol::lib::os, sol::lib::utf8);
+    p.io = &io;
+    p.timeout_ms = timeout_ms;
+    p.out = &out;
+    std::vector<Finding> sink; // add_finding from a check is ignored
+    p.findings = &sink;
+    p.ctx_host = host;
+    p.ctx_port = port;
+
+    try {
+        std::ifstream in(path);
+        if (!in) throw std::runtime_error("cannot open file");
+        std::string code((std::istreambuf_iterator<char>(in)),
+                         std::istreambuf_iterator<char>());
+
+        sol::table env = make_safe_env(lua.lua_state());
+        sol::table api = lua.create_table();
+        env["sleipnir"] = api;
+        register_api(p, lua, api);
+
+        sol::protected_function chunk =
+            load_plugin_script(lua, code, p.name, env);
+        if (!chunk.valid()) throw std::runtime_error("syntax error");
+        auto loaded = chunk();
+        if (!loaded.valid())
+            throw std::runtime_error(std::string("load error: ") +
+                                     loaded.get<sol::error>().what());
+
+        sol::object fn_obj = env.raw_get<sol::object>(std::string("verify"));
+        if (!fn_obj.valid())
+            throw std::runtime_error("no verify(ctx) function defined");
+        sol::protected_function fn = fn_obj;
+
+        sol::table ctx = lua.create_table();
+        ctx["host"] = host;
+        ctx["port"] = port;
+        ctx["timeout"] = timeout_ms;
+
+        auto res = fn(ctx);
+        if (!res.valid())
+            throw std::runtime_error(std::string("verify error: ") +
+                                     res.get<sol::error>().what());
+        sol::object ret = res;
+        if (ret.is<sol::table>()) {
+            sol::table t = ret;
+            result.verified = t.get_or("verified", false);
+            result.evidence = t.get_or<std::string>("evidence", "");
+        } else if (ret.is<bool>()) {
+            result.verified = ret.as<bool>();
+        }
+    } catch (const std::exception& e) {
+        result.error = e.what();
+        result.verified = false;
+    }
+    return result;
+}
+
 std::vector<PluginHost::LoadReport> PluginHost::load_dir(const std::string& dir) {
     std::vector<LoadReport> reports;
     std::error_code ec;

@@ -66,14 +66,57 @@ void flush_unverified(std::vector<Finding>& pending,
     pending.clear();
 }
 
+// Runs one finding's script-based check. Script checks carry their own
+// transports (tcp_connect/http_get via the sandboxed Lua API), so they
+// work for non-HTTP services like Redis just as well.
+void apply_script_check(Finding& f, PluginHost& plugins,
+                        const std::string& checks_dir,
+                        const std::string& host, uint16_t port,
+                        asio::io_context& io, int timeout, bool safe,
+                        ResultCollector& collector) {
+    if (!f.check || f.check->script.empty()) return;
+    if (safe && !f.check->safe) return; // --safe policy: not safe-mode compatible
+    auto r = plugins.run_check_script(checks_dir + f.check->script, host,
+                                      port, io, timeout, collector);
+    if (r.verified) {
+        f.verified = true;
+        f.confidence = "confirmed";
+        if (!r.evidence.empty())
+            f.evidence = f.evidence.empty() ? r.evidence
+                                            : f.evidence + "; " + r.evidence;
+    } else if (!r.error.empty()) {
+        collector.log("  [verify] check script '" + f.check->script +
+                      "' failed: " + r.error);
+    }
+}
+
+// Non-HTTP services still get their script-based checks run; probe-based
+// findings stay "potential" (no HTTP transport to verify them over).
+void verify_scripts_and_flush(std::vector<Finding>& pending,
+                              ResultCollector& collector, asio::io_context& io,
+                              PluginHost& plugins,
+                              const std::string& checks_dir,
+                              const std::string& host, uint16_t port,
+                              int timeout, bool safe) {
+    for (auto& f : pending) {
+        apply_script_check(f, plugins, checks_dir, host, port, io, timeout,
+                           safe, collector);
+        collector.add_finding(std::move(f));
+    }
+    pending.clear();
+}
+
 // Verification stage over an HTTP transport: the universal Log4Shell canary
 // plus every CVE record's active check. A marker in a response upgrades the
-// finding from potential to confirmed with probe evidence.
+// finding from potential to confirmed with probe evidence. Script-based
+// checks (VulnCheck::script) run through the Lua host on their own
+// transports, independent of this stream.
 template <typename Stream>
 void verification_stage(Stream& stream, const ScanConfig& cfg,
                         const std::string& host, uint16_t port, int timeout,
                         std::vector<Finding>& pending,
-                        ResultCollector& collector) {
+                        ResultCollector& collector, asio::io_context& io,
+                        PluginHost& plugins, const std::string& checks_dir) {
     if (cfg.no_verify) {
         flush_unverified(pending, collector);
         return;
@@ -83,7 +126,11 @@ void verification_stage(Stream& stream, const ScanConfig& cfg,
     if (auto f = check_log4shell(fetch, host, port, canary_token()))
         collector.add_finding(std::move(*f));
     for (auto& f : pending) {
-        if (f.check) verify_finding(fetch, f, !cfg.safe);
+        if (f.check && !f.check->script.empty())
+            apply_script_check(f, plugins, checks_dir, host, port, io,
+                               timeout, cfg.safe, collector);
+        else if (f.check)
+            verify_finding(fetch, f, !cfg.safe);
         collector.add_finding(std::move(f));
     }
     pending.clear();
@@ -93,6 +140,7 @@ void verification_stage(Stream& stream, const ScanConfig& cfg,
 
 ScanEngine::ScanEngine(const ScanConfig& cfg)
     : cfg_(cfg),
+      checks_dir_(cfg.plugins_dir + "/checks/"),
       probes_(ProbeDb::load(cfg.data_dir + "/service_probes.json")),
       cves_(CveDb::load(cfg.data_dir + "/cve_map.json")) {
     collector_.set_verbose(cfg.verbose);
@@ -284,12 +332,15 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
             }
             plugins_.on_service(ctx, io, timeout, collector_);
 
-            // Active CVE verification over the TLS transport.
-            if (http_ok)
-                verification_stage(tls, cfg_, job.host, job.port, timeout,
-                                   pending_cve, collector_);
-            else
-                flush_unverified(pending_cve, collector_);
+             // Active CVE verification over the TLS transport.
+             if (http_ok)
+                 verification_stage(tls, cfg_, job.host, job.port, timeout,
+                                    pending_cve, collector_, io, plugins_,
+                                    checks_dir_);
+             else
+                 verify_scripts_and_flush(pending_cve, collector_, io,
+                                          plugins_, checks_dir_, job.host,
+                                          job.port, timeout, cfg_.safe);
 
             collector_.add_port(std::move(result));
             return 0;
@@ -363,12 +414,14 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
     plugins_.on_service(ctx, io, timeout, collector_);
 
     // Active CVE verification: over HTTP the buffered findings can be proven
-    // by their checks; without HTTP they stay version-matched suspicions.
+    // by their checks; without HTTP only script-based checks can still run.
     if (http_ok)
         verification_stage(client, cfg_, job.host, job.port, timeout,
-                           pending_cve, collector_);
+                           pending_cve, collector_, io, plugins_, checks_dir_);
     else
-        flush_unverified(pending_cve, collector_);
+        verify_scripts_and_flush(pending_cve, collector_, io, plugins_,
+                                 checks_dir_, job.host, job.port, timeout,
+                                 cfg_.safe);
 
     // 5. robustness fuzzing (own stand only!)
     if (cfg_.fuzz) {

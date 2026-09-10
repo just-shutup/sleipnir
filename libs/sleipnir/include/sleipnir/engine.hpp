@@ -58,6 +58,7 @@ private:
     int process_job(const Job& job, TcpClient& client, asio::io_context& io);
 
     ScanConfig cfg_;
+    std::string checks_dir_; // plugins_dir + "/checks/" (Lua CVE checks)
     ProbeDb probes_;
     CveDb cves_;
     PluginHost plugins_;

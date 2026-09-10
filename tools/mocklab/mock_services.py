@@ -15,11 +15,11 @@ Every listener emulates a real service badly enough to trip the scanner:
                              but the double-encoded .%%32%65 bypass works
                              -> CVE-2021-42013 CONFIRMED over the TLS
                              transport
-  127.0.0.1:8081  WordPress  WordPress 5.8.1 on PHP/5.4.1 behind nginx
+  127.0.0.1:8081  WordPress  WordPress 4.7 on PHP/5.4.1 behind nginx
                              1.18.0, REST user enumeration, CORS reflection;
                              php-cgi runs query-string switches -> ?-s dumps
                              highlighted source
-                             -> CVE-2012-1823 CONFIRMED by active check
+                             -> CVE-2012-1823 and CVE-2017-5487 CONFIRMED
   127.0.0.1:8082  SPA        GraphQL introspection, actuator, OpenAPI, SQL
                              errors; the Java backend evaluates JNDI
                              expressions from request headers
@@ -34,9 +34,10 @@ Every listener emulates a real service badly enough to trip the scanner:
                              down: version still matches CVE-2021-41773,
                              the check fails -> stays "potential"
                              (negative stand)
-  127.0.0.1:8085  PHP-hardened    same WordPress/PHP/5.4.1 stack, php-cgi
-                             query-string flaw patched: ?-s renders the
-                             page -> CVE-2012-1823 stays "potential"
+  127.0.0.1:8085  PHP-hardened    WordPress 4.7 on PHP/5.4.1, php-cgi
+                             query-string flaw patched AND the REST users
+                             endpoint requires auth -> CVE-2012-1823 and
+                             CVE-2017-5487 stay "potential"
                              (negative stand)
   127.0.0.1:8086  Grafana-hardened  Grafana v8.3.0, plugin route traversal
                              fixed -> CVE-2021-43798 stays "potential"
@@ -48,7 +49,22 @@ Every listener emulates a real service badly enough to trip the scanner:
                              traversal open -> CVE-2021-43798 CONFIRMED
   127.0.0.1:8089  Webmin     MiniServ/1.910, password_change.cgi runs the
                              injected command -> CVE-2019-15107 CONFIRMED
-  127.0.0.1:6380  Redis      unauthenticated Redis 6.0.16   -> CVE-2022-0543
+  127.0.0.1:8090  Elasticsearch  1.4.0 with Groovy script_fields enabled
+                             -> CVE-2015-1427 CONFIRMED
+  127.0.0.1:8091  ES-hardened    same 1.4.0 with inline scripts disabled
+                             -> CVE-2015-1427 stays "potential"
+                             (negative stand)
+  127.0.0.1:8092  BIG-IP     BigIP 13.1.0, TMUI fileRead traversal open
+                             -> CVE-2020-5902 CONFIRMED
+  127.0.0.1:8093  BIG-IP-hardened  same 13.1.0 with the TMUI hotfix
+                             -> CVE-2020-5902 stays "potential"
+                             (negative stand)
+  127.0.0.1:8094  Jenkins    2.426, CLI argument expansion over chunked
+                             POST reads /etc/passwd
+                             -> CVE-2024-23897 CONFIRMED via check script
+  127.0.0.1:8095  Jenkins-hardened  same 2.426 with the CLI fixed
+                             -> CVE-2024-23897 stays "potential"
+                             (negative stand)
   127.0.0.1:2375  Docker     Docker Engine API without TLS/auth (root-equivalent)
   127.0.0.1:2501  SMTP       Postfix banner, accepts any RCPT (open relay),
                              VRFY confirms mailboxes (enumeration)
@@ -64,7 +80,7 @@ Every listener emulates a real service badly enough to trip the scanner:
 
 Usage:  python3 tools/mocklab/mock_services.py
 Then:   ./build/apps/sleipnir/sleipnir scan 127.0.0.1 \
-            -p 2101,2102,2201,2375,2501,2502,2503,6380,8080-8089,8443
+            -p 2101,2102,2201,2375,2501,2502,2503,6380,6381,8080-8095,8443
         ./build/apps/sleipnir/sleipnir scan 127.0.0.1 -p 1900 --udp \
             --udp-ports 1900,5353,11211,161
 """
@@ -77,6 +93,7 @@ import ssl
 import subprocess
 import tempfile
 import threading
+import time
 import os
 from http.server import BaseHTTPRequestHandler
 from urllib.parse import unquote, urlsplit
@@ -314,13 +331,16 @@ class ApacheHardenedHandler(LabHTTPRequestHandler):
 
 class RedisLabHandler(socketserver.StreamRequestHandler):
     """Minimal RESP implementation: an unauthenticated Redis 6.0.16 whose
-    INFO replies with the version (CVE-2022-0543 territory)."""
+    INFO replies with the version (CVE-2022-0543 territory). The Lua
+    sandbox is leaky: EVAL "return tostring(package)" answers with a table
+    address instead of nil."""
 
     INFO_BODY = (
         b"# Server\r\nredis_version:6.0.16\r\nredis_mode:standalone\r\n"
         b"os:Linux 5.4.0 x86_64\r\nrun_id:mocklab\r\ntcp_port:6380\r\n"
         b"uptime_in_seconds:42\r\n"
     )
+    lua_sandbox_leaky = True
 
     def handle(self):
         try:
@@ -337,6 +357,15 @@ class RedisLabHandler(socketserver.StreamRequestHandler):
                     self.request.sendall(
                         b"$" + str(len(body)).encode() + b"\r\n" + body + b"\r\n"
                     )
+                elif data.startswith(b"*") and b"EVAL" in data:
+                    # CVE-2022-0543: the Lua sandbox exposes `package` on
+                    # vulnerable Debian builds; the patched one returns nil
+                    if self.lua_sandbox_leaky and b"package" in data:
+                        self.request.sendall(
+                            b"$21\r\ntable: 0x7f8a1c00b3d0\r\n"
+                        )
+                    else:
+                        self.request.sendall(b"$3\r\nnil\r\n")
                 elif cmd.startswith(b"QUIT"):
                     self.request.sendall(b"+OK\r\n")
                     break
@@ -346,6 +375,13 @@ class RedisLabHandler(socketserver.StreamRequestHandler):
                     )
         except OSError:
             pass
+
+
+class RedisHardenedHandler(RedisLabHandler):
+    """Redis 6.0.16 with the Lua sandbox fixed (negative stand): EVAL
+    answers 'nil', so the CVE-2022-0543 check script must fail."""
+
+    lua_sandbox_leaky = False
 
 
 class DockerApiHandler(BaseHTTPRequestHandler):
@@ -384,16 +420,38 @@ class DockerApiHandler(BaseHTTPRequestHandler):
 
 
 class WordPressHandler(BaseHTTPRequestHandler):
-    """A WordPress 5.8.1 on PHP/5.4.1 behind nginx 1.18.0: every component
-    has a known CVE, the REST API leaks user logins, and php-cgi executes
-    query-string switches (CVE-2012-1823): ?-s dumps highlighted source."""
+    """A WordPress 4.7 on PHP/5.4.1 behind nginx 1.18.0: every component
+    has a known CVE, the REST API leaks user logins (CVE-2017-5487, fixed
+    only in 4.7.1), and php-cgi executes query-string switches
+    (CVE-2012-1823): ?-s dumps highlighted source."""
 
     server_version = "nginx/1.18.0"
     php_version = "PHP/5.4.1"
     php_cgi_vulnerable = True
+    rest_users_exposed = True
 
     def do_GET(self):
         path, _, query = self.path.partition("?")
+        # CVE-2017-5487: the REST API lists users without authentication
+        if path in ("/wp-json/wp/v2/users", "/") and (
+            path == "/wp-json/wp/v2/users"
+            or query.startswith("rest_route=/wp/v2/users")
+        ):
+            if self.rest_users_exposed:
+                body = (
+                    b'[{"id":1,"name":"admin","slug":"admin",'
+                    b'"user_roles":["administrator"]},'
+                    b'{"id":2,"name":"Editor","slug":"editor"},'
+                    b'{"id":3,"name":"dev","slug":"dev"}]'
+                )
+                self._send(200, body)
+            else:
+                self._send(
+                    401,
+                    b'{"code":"rest_cannot_list_users","message":"Sorry, '
+                    b'you are not allowed to list users."}',
+                )
+            return
         # CVE-2012-1823: php-cgi treats the query string as CLI switches;
         # -s prints the script source with syntax highlighting.
         if self.php_cgi_vulnerable and query.strip() in ("-s", "-s&"):
@@ -409,7 +467,7 @@ class WordPressHandler(BaseHTTPRequestHandler):
         if path == "/":
             body = (
                 b"<!DOCTYPE html><html><head>"
-                b'<meta name="generator" content="WordPress 5.8.1" />'
+                b'<meta name="generator" content="WordPress 4.7" />'
                 b"<title>Mock WP</title></head><body>"
                 b'<link rel="stylesheet" href="/wp-content/themes/mock/style.css">'
                 b"<p>Welcome to the mock WordPress site.</p></body></html>"
@@ -424,13 +482,6 @@ class WordPressHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
-        elif path == "/wp-json/wp/v2/users":
-            body = (
-                b'[{"id":1,"name":"admin","slug":"admin"},'
-                b'{"id":2,"name":"Editor","slug":"editor"},'
-                b'{"id":3,"name":"dev","slug":"dev"}]'
-            )
-            self._send(200, body)
         else:
             self._send(404, b"Not Found")
 
@@ -447,11 +498,13 @@ class WordPressHandler(BaseHTTPRequestHandler):
 
 
 class PhpCgiHardenedHandler(WordPressHandler):
-    """The same WordPress/PHP/5.4.1 stack with the php-cgi query-string
-    flaw patched (negative stand): ?-s renders the page, never the source,
-    so the CVE-2012-1823 check must fail and the finding stays potential."""
+    """The same WordPress 4.7 / PHP/5.4.1 stack with the php-cgi
+    query-string flaw patched AND the REST users endpoint locked down
+    (negative stand): both CVE-2012-1823 and CVE-2017-5487 checks must fail
+    and the findings stay potential."""
 
     php_cgi_vulnerable = False
+    rest_users_exposed = False
 
 
 class SpaHandler(BaseHTTPRequestHandler):
@@ -786,6 +839,202 @@ class WebminHardenedHandler(WebminHandler):
     injectable = False
 
 
+class ElasticsearchHandler(BaseHTTPRequestHandler):
+    """Elasticsearch 1.4.0 (CVE-2015-1427 territory): Groovy script_fields
+    in search queries are enabled by default, so an inline script is
+    evaluated and its result comes back in the response."""
+
+    groovy_enabled = True
+
+    def version_string(self):
+        return "Elasticsearch/1.4.0"
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/":
+            body = (
+                b'{"status":200,"name":"mock-es","cluster_name":"mocklab",'
+                b'"version":{"number":"1.4.0","build_hash":"c59f00b",'
+                b'"build_timestamp":"2015-02-11T19:23:31Z",'
+                b'"lucene_version":"4.10.2"},'
+                b'"tagline":"You Know, for Search"}'
+            )
+            self._send(200, body)
+        else:
+            self._send(404, b'{"error":"Not Found","status":404}')
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length else b""
+        if self.path.split("?")[0] != "/_search":
+            self._send(404, b'{"error":"Not Found","status":404}')
+            return
+        if self.groovy_enabled and b"script_fields" in body and b"7*7" in body:
+            # the inline Groovy expression is evaluated: 7*7 -> 49
+            resp = (
+                b'{"took":5,"timed_out":false,"hits":{"total":1,'
+                b'"hits":[{"_index":"mock","_type":"doc","_id":"1",'
+                b'"_score":1.0,"fields":{"slnck":[49]}}]}}'
+            )
+            self._send(200, resp)
+        elif not self.groovy_enabled and b"script_fields" in body:
+            self._send(
+                400,
+                b'{"error":"ElasticsearchException[scripts of type [inline],'
+                b' operation [search] and lang [groovy] are disabled]",'
+                b'"status":400}',
+            )
+        else:
+            self._send(200, b'{"took":2,"hits":{"total":0,"hits":[]}}')
+
+    def _send(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class ElasticsearchHardenedHandler(ElasticsearchHandler):
+    """Elasticsearch 1.4.0 with dynamic scripting disabled (negative
+    stand): the version still matches CVE-2015-1427 but the script_fields
+    probe is rejected."""
+
+    groovy_enabled = False
+
+
+class BigIpHandler(BaseHTTPRequestHandler):
+    """F5 BIG-IP 13.1.0 with the pre-CVE-2020-5902 TMUI: the fileRead.jsp
+    workspace endpoint serves arbitrary files without authentication."""
+
+    traversal_vulnerable = True
+
+    def version_string(self):
+        return "BigIP/13.1.0"
+
+    def do_GET(self):
+        path = unquote(self.path)
+        if "fileRead.jsp" in path and "fileName=/etc/passwd" in path:
+            if self.traversal_vulnerable:
+                self._send(200, PASSWD_BODY, "text/plain")
+            else:
+                self._send(404, b"Object not found", "text/html")
+            return
+        if path == "/" or path.startswith("/tmui/login.jsp"):
+            body = (
+                b"<!DOCTYPE html><html><head><title>BIG-IP</title></head>"
+                b"<body><h1>BIG-IP Configuration Utility</h1>"
+                b"<form action='/tmui/logmein.html' method='POST'>"
+                b"<input name='username'><input type='password'"
+                b" name='passwd'><button>Log in</button></form>"
+                b"</body></html>"
+            )
+            self._send(200, body, "text/html")
+        else:
+            self._send(404, b"Object not found", "text/html")
+
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class BigIpHardenedHandler(BigIpHandler):
+    """BIG-IP 13.1.0 with the CVE-2020-5902 hotfix applied (negative
+    stand): the traversal still matches by version but fileRead 404s."""
+
+    traversal_vulnerable = False
+
+
+class JenkinsHandler(BaseHTTPRequestHandler):
+    """Jenkins 2.426 (CVE-2024-23897): the /cli endpoint expands leading @
+    arguments as file references. The chunked-POST 'help @/etc/passwd'
+    command echoes the file content back."""
+
+    cli_vulnerable = True
+
+    def version_string(self):
+        return "Jetty/9.4.z-SNAPSHOT"
+
+    def end_headers(self):
+        # every answer carries the Jenkins version header (the fingerprint)
+        self.send_header("X-Jenkins", "2.426")
+        super().end_headers()
+
+    def _read_body(self):
+        if (self.headers.get("Transfer-Encoding", "").lower() == "chunked"):
+            body = b""
+            while True:
+                line = self.rfile.readline().strip()
+                try:
+                    size = int(line.split(b";")[0], 16)
+                except ValueError:
+                    break
+                if size == 0:
+                    while True:
+                        t = self.rfile.readline()
+                        if t in (b"\r\n", b"\n", b""):
+                            break
+                    break
+                body += self.rfile.read(size)
+                self.rfile.readline()
+            return body
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        return self.rfile.read(length) if length else b""
+
+    def do_GET(self):
+        path = self.path.split("?")[0]
+        if path == "/":
+            body = (
+                b"<!DOCTYPE html><html><head><title>Dashboard [Jenkins]</title>"
+                b"</head><body><h1>Jenkins</h1>"
+                b'<a href="/cli">CLI</a></body></html>'
+            )
+            self._send(200, body)
+        elif path == "/cli":
+            self._send(200, b"Jenkins CLI: POST commands here")
+        else:
+            self._send(404, b"Not Found")
+
+    def do_POST(self):
+        body = self._read_body()
+        path = self.path.split("?")[0]
+        if path == "/cli" or path.startswith("/cli?"):
+            if self.cli_vulnerable and b"@/etc/passwd" in body:
+                # argument expansion reads the file into the command output
+                out = b"help: prints usage\n" + PASSWD_BODY
+                self._send(200, out)
+            else:
+                self._send(403, b"Authentication required")
+        else:
+            self._send(404, b"Not Found")
+
+    def _send(self, code, body):
+        self.send_response(code)
+        self.send_header("Content-Type", "text/plain")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
+class JenkinsHardenedHandler(JenkinsHandler):
+    """Jenkins 2.426 with the CLI argument expansion fixed (negative
+    stand): /cli rejects unauthenticated POSTs, the check script fails."""
+
+    cli_vulnerable = False
+
+
 # ---------------------------------------------------------------------------
 # UDP services (Sleipnir --udp probe targets; all ports >1024 so the lab
 # runs unprivileged)
@@ -859,6 +1108,7 @@ SERVICES = [
     ("smtp-strict", 2502, SmtpStrictHandler),
     ("crashy-echo", 2503, EchoCrashHandler, CrashyTCPServer),
     ("redis", 6380, RedisLabHandler),
+    ("redis-hard", 6381, RedisHardenedHandler),
     ("docker-api", 2375, DockerApiHandler, LabHTTPServer),
     ("wordpress", 8081, WordPressHandler, LabHTTPServer),
     ("spa", 8082, SpaHandler, LabHTTPServer),
@@ -872,6 +1122,12 @@ SERVICES = [
     # verification-stage positive stands
     ("grafana-vuln", 8088, GrafanaHandler, LabHTTPServer),
     ("webmin-vuln", 8089, WebminHandler, LabHTTPServer),
+    ("elasticsearch", 8090, ElasticsearchHandler, LabHTTPServer),
+    ("es-hardened", 8091, ElasticsearchHardenedHandler, LabHTTPServer),
+    ("bigip-vuln", 8092, BigIpHandler, LabHTTPServer),
+    ("bigip-hardened", 8093, BigIpHardenedHandler, LabHTTPServer),
+    ("jenkins-vuln", 8094, JenkinsHandler, LabHTTPServer),
+    ("jenkins-hardened", 8095, JenkinsHardenedHandler, LabHTTPServer),
 ]
 
 class Ipv6TcpServer(socketserver.ThreadingTCPServer):

@@ -70,6 +70,23 @@ public:
 
     ~PluginHost(); // out-of-line: Plugin is incomplete in this header
 
+    // Result of a script-based CVE check (plugins/checks/*.lua). The script
+    // defines `function verify(ctx)` with ctx = {host, port, timeout} and
+    // returns {verified=bool, evidence=string}; it may use the same
+    // sandboxed API as hook plugins (tcp_connect, http_get, ...).
+    struct ScriptCheckResult {
+        bool verified = false;
+        std::string evidence;
+        std::string error; // load/runtime error; empty on success
+    };
+
+    // Loads and runs a check script on demand. Never throws: failures come
+    // back as error text in the result.
+    ScriptCheckResult run_check_script(const std::string& path,
+                                       const std::string& host, uint16_t port,
+                                       asio::io_context& io, int timeout_ms,
+                                       ResultCollector& out);
+
     // Loads every .lua file in dir (non-recursive). Missing dir is not an
     // error (plugins are optional).
     std::vector<LoadReport> load_dir(const std::string& dir);

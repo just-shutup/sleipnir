@@ -171,6 +171,12 @@
         },
         {
           "service": "http",
+          "regex": "\"version\" ?: ?\\{\"number\":\"([\\d.]+)\"",
+          "product": "Elasticsearch",
+          "version_group": 1
+        },
+        {
+          "service": "http",
           "regex": "\"cluster_name\"|\"tagline\" : \"You Know, for Search\"",
           "product": "Elasticsearch"
         },

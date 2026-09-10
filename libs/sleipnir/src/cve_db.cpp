@@ -72,41 +72,44 @@ std::string strip(std::string s) {
     return s.substr(b, e - b + 1);
 }
 
-// Parses a "check" block: {"probes": [{method, path, body, content_type,
-// headers: ["Name: value"], markers: [...], not_markers: [...]}]}. A
-// malformed check degrades to nullopt (finding stays potential) instead of
-// rejecting the whole database.
+// Parses a "check" block: either {"probes": [{method, path, body,
+// content_type, headers: ["Name: value"], markers: [...], not_markers:
+// [...]}]}, or {"script": "file.lua", "safe": false} referencing a Lua
+// check script (plugins/checks/). A malformed check degrades to nullopt
+// (finding stays potential) instead of rejecting the whole database.
 std::shared_ptr<const VulnCheck> parse_check(const json& j) {
-    if (!j.contains("probes") || !j["probes"].is_array() ||
-        j["probes"].empty())
-        return nullptr;
-
     auto check = std::make_shared<VulnCheck>();
-    for (const auto& pj : j["probes"]) {
-        VulnCheckProbe p;
-        p.path = pj.value("path", "");
-        if (p.path.empty()) return nullptr;
-        if (pj.contains("markers") && pj["markers"].is_array())
-            for (const auto& m : pj["markers"])
-                p.markers.push_back(m.get<std::string>());
-        if (p.markers.empty()) return nullptr;
-        p.method = pj.value("method", ""); // empty -> inferred by the executor
-        p.body = pj.value("body", "");
-        p.content_type = pj.value("content_type", "");
-        if (pj.contains("headers") && pj["headers"].is_array())
-            for (const auto& h : pj["headers"]) {
-                std::string hs = h.get<std::string>();
-                size_t colon = hs.find(':');
-                if (colon == std::string::npos) return nullptr;
-                p.headers.push_back({strip(hs.substr(0, colon)),
-                                     strip(hs.substr(colon + 1))});
-            }
-        if (pj.contains("not_markers") && pj["not_markers"].is_array())
-            for (const auto& m : pj["not_markers"])
-                p.not_markers.push_back(m.get<std::string>());
-        check->probes.push_back(std::move(p));
+    check->script = j.value("script", "");
+    check->safe = j.value("safe", true);
+
+    if (j.contains("probes") && j["probes"].is_array()) {
+        for (const auto& pj : j["probes"]) {
+            VulnCheckProbe p;
+            p.path = pj.value("path", "");
+            if (p.path.empty()) return nullptr;
+            if (pj.contains("markers") && pj["markers"].is_array())
+                for (const auto& m : pj["markers"])
+                    p.markers.push_back(m.get<std::string>());
+            if (p.markers.empty()) return nullptr;
+            p.method = pj.value("method", ""); // empty -> inferred by the executor
+            p.body = pj.value("body", "");
+            p.content_type = pj.value("content_type", "");
+            if (pj.contains("headers") && pj["headers"].is_array())
+                for (const auto& h : pj["headers"]) {
+                    std::string hs = h.get<std::string>();
+                    size_t colon = hs.find(':');
+                    if (colon == std::string::npos) return nullptr;
+                    p.headers.push_back({strip(hs.substr(0, colon)),
+                                         strip(hs.substr(colon + 1))});
+                }
+            if (pj.contains("not_markers") && pj["not_markers"].is_array())
+                for (const auto& m : pj["not_markers"])
+                    p.not_markers.push_back(m.get<std::string>());
+            check->probes.push_back(std::move(p));
+        }
     }
-    return check;
+    if (!check->script.empty()) return check; // script path: probes optional
+    return check->probes.empty() ? nullptr : check;
 }
 
 VulnEntry parse_vuln(const json& j) {

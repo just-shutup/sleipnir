@@ -69,6 +69,23 @@ std::optional<std::string> run_vuln_check(const ProbeFetcher& fetch,
         if (poisoned) continue;
 
         for (const auto& marker : probe.markers) {
+            // "@header:Name:substring" — confirmation lives in a response
+            // header (e.g. a leaked value in Allow): confirmed when the
+            // named header exists and contains the substring.
+            if (marker.rfind("@header:", 0) == 0) {
+                size_t sep = marker.find(':', 8);
+                if (sep == std::string::npos) continue;
+                std::string hname = ascii_lower(marker.substr(8, sep - 8));
+                std::string needle = marker.substr(sep + 1);
+                const std::string* hv = resp->header(hname);
+                if (!hv) continue;
+                if (!needle.empty() &&
+                    hv->find(needle) == std::string::npos)
+                    continue;
+                return method + " " + probe.path + " -> " +
+                       std::to_string(resp->status) + ", header " + hname +
+                       ": " + one_line(*hv);
+            }
             size_t pos = resp->body.find(marker);
             if (pos == std::string::npos) continue;
             std::string evidence =

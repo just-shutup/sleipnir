@@ -6,6 +6,8 @@
 #include "sleipnir/http_client.hpp"
 #include "sleipnir/cve_db.hpp"
 #include "sleipnir/fuzz.hpp"
+#include "sleipnir/plugins.hpp"
+#include "sleipnir/results.hpp"
 #include "sleipnir/syn_scan.hpp"
 #include "sleipnir/targets.hpp"
 #include "sleipnir/types.hpp"
@@ -921,6 +923,10 @@ TEST_CASE("shipped cve_map carries active checks for the big five") {
         {"Grafana", "8.3.0", "CVE-2021-43798", false},
         {"Webmin", "1.910", "CVE-2019-15107", true},
         {"MiniServ", "1.910", "CVE-2019-15107", true}, // alias
+        {"Elasticsearch", "1.4.0", "CVE-2015-1427", true}, // Groovy POST
+        {"WordPress", "4.7", "CVE-2017-5487", false},      // REST users GET
+        {"BigIP", "13.1.0", "CVE-2020-5902", false},       // TMUI fileRead
+        {"F5 BIG-IP", "13.1.0", "CVE-2020-5902", false},   // product name
     };
     for (const auto& c : cases) {
         auto findings = db.match("h", 1, c.product, c.version);
@@ -944,10 +950,172 @@ TEST_CASE("shipped cve_map carries active checks for the big five") {
         CHECK(found);
     }
 
+    // script-based checks: Redis sandbox escape (read-only, safe) and the
+    // Jenkins CLI chunked POST (state-changing, not safe)
+    auto redis = db.match("h", 6379, "Redis", "6.0.16");
+    bool redis_ck = false;
+    for (const auto& f : redis) {
+        if (f.cve != "CVE-2022-0543") continue;
+        REQUIRE(f.check);
+        CHECK(f.check->script == "cve-2022-0543.lua");
+        CHECK(f.check->safe);
+        redis_ck = true;
+    }
+    CHECK(redis_ck);
+    auto jenkins = db.match("h", 8080, "Jenkins", "2.426");
+    bool jenkins_ck = false;
+    for (const auto& f : jenkins) {
+        if (f.cve != "CVE-2024-23897") continue;
+        REQUIRE(f.check);
+        CHECK(f.check->script == "cve-2024-23897.lua");
+        CHECK_FALSE(f.check->safe); // POST-based -> skipped in --safe
+        jenkins_ck = true;
+    }
+    CHECK(jenkins_ck);
+
     // records without a check block stay version-matching only
     auto ssh = db.match("h", 22, "OpenSSH", "7.2p2");
     REQUIRE_FALSE(ssh.empty());
     CHECK(ssh[0].check == nullptr);
+}
+
+TEST_CASE("run_vuln_check confirms markers in response headers") {
+    // "@header:Name:substring" — the marker lives in a response header
+    VulnCheck check;
+    VulnCheckProbe p;
+    p.path = "/";
+    p.method = "OPTIONS";
+    p.markers = {"@header:allow:xZQ9z"};
+    check.probes = {p};
+
+    HttpResponse with_leak = mk_response("<html>ok</html>");
+    with_leak.headers["allow"] = "GET,POST,OPTIONS,xZQ9z";
+    auto leak = constant_fetch(with_leak);
+    auto ev = run_vuln_check(leak, check, true);
+    REQUIRE(ev);
+    CHECK(ev->find("OPTIONS /") != std::string::npos);
+    CHECK(ev->find("allow") != std::string::npos);
+    CHECK(ev->find("xZQ9z") != std::string::npos);
+
+    // negative: header absent
+    auto no_header = constant_fetch(mk_response("<html>ok</html>"));
+    CHECK_FALSE(run_vuln_check(no_header, check, true));
+    // negative: header present but without the leaked value
+    HttpResponse clean = mk_response("<html>ok</html>");
+    clean.headers["allow"] = "GET,POST,OPTIONS";
+    auto no_leak = constant_fetch(clean);
+    CHECK_FALSE(run_vuln_check(no_leak, check, true));
+    // header names are looked up case-insensitively
+    HttpResponse mixed = mk_response("<html>ok</html>");
+    mixed.headers["Allow"] = "GET,xZQ9z"; // raw insertion keeps the case
+    auto mixed_fetch = constant_fetch(mixed);
+    // header() requires the lowercase key; simulate what parse_response does
+    HttpResponse lower = mk_response("<html>ok</html>");
+    lower.headers["allow"] = "GET,xZQ9z";
+    CHECK(run_vuln_check(constant_fetch(lower), check, true));
+}
+
+TEST_CASE("check blocks with script references parse") {
+    const char* path = "/tmp/sleipnir_test_cve_script.json";
+    {
+        std::ofstream out(path);
+        out << R"({
+            "testprod": {
+                "product": "TestProd",
+                "aliases": ["testprod"],
+                "vulns": [
+                    {"cve": "CVE-1000-0001", "affected": "<2.0", "cvss": 9.0,
+                     "check": {"script": "my-check.lua"}},
+                    {"cve": "CVE-1000-0002", "affected": "<2.0", "cvss": 9.0,
+                     "check": {"script": "unsafe-check.lua", "safe": false}},
+                    {"cve": "CVE-1000-0003", "affected": "<2.0", "cvss": 5.0,
+                     "check": {"probes": []}}
+                ]
+            }
+        })";
+    }
+    auto db = CveDb::load(path);
+    std::remove(path);
+
+    auto findings = db.match("h", 1, "TestProd", "1.0");
+    REQUIRE(findings.size() == 3);
+    for (const auto& f : findings) {
+        CHECK_FALSE(f.verified);
+        CHECK(f.confidence == "potential");
+        if (f.cve == "CVE-1000-0001") {
+            REQUIRE(f.check);
+            CHECK(f.check->script == "my-check.lua");
+            CHECK(f.check->safe); // default
+            CHECK(f.check->probes.empty());
+        } else if (f.cve == "CVE-1000-0002") {
+            REQUIRE(f.check);
+            CHECK(f.check->script == "unsafe-check.lua");
+            CHECK_FALSE(f.check->safe);
+        } else {
+            // empty probes without a script -> unusable check is dropped
+            CHECK(f.check == nullptr);
+        }
+    }
+}
+
+TEST_CASE("plugin host runs check scripts") {
+    PluginHost host;
+    asio::io_context io;
+    ResultCollector out;
+
+    // positive: the script verifies with evidence
+    const char* ok_path = "/tmp/sleipnir_check_ok.lua";
+    {
+        std::ofstream f(ok_path);
+        f << "function verify(ctx)\n"
+             "  return { verified = true, evidence = 'GET /x -> marker' }\n"
+             "end\n";
+    }
+    auto r = host.run_check_script(ok_path, "h", 80, io, 100, out);
+    CHECK(r.error.empty());
+    CHECK(r.verified);
+    CHECK(r.evidence.find("marker") != std::string::npos);
+    std::remove(ok_path);
+
+    // negative: the script reports no confirmation
+    const char* no_path = "/tmp/sleipnir_check_no.lua";
+    {
+        std::ofstream f(no_path);
+        f << "function verify(ctx)\n"
+             "  return { verified = false }\n"
+             "end\n";
+    }
+    auto r2 = host.run_check_script(no_path, "h", 80, io, 100, out);
+    CHECK(r2.error.empty());
+    CHECK_FALSE(r2.verified);
+    std::remove(no_path);
+
+    // missing verify() -> error, not a crash
+    const char* bad_path = "/tmp/sleipnir_check_bad.lua";
+    {
+        std::ofstream f(bad_path);
+        f << "function something_else()\n end\n";
+    }
+    auto r3 = host.run_check_script(bad_path, "h", 80, io, 100, out);
+    CHECK_FALSE(r3.error.empty());
+    CHECK_FALSE(r3.verified);
+    std::remove(bad_path);
+
+    // syntax error -> error text
+    const char* syn_path = "/tmp/sleipnir_check_syn.lua";
+    {
+        std::ofstream f(syn_path);
+        f << "function verify(ctx) return { verified = \n";
+    }
+    auto r4 = host.run_check_script(syn_path, "h", 80, io, 100, out);
+    CHECK_FALSE(r4.error.empty());
+    std::remove(syn_path);
+
+    // missing file -> error, no throw
+    auto r5 = host.run_check_script("/tmp/sleipnir_check_missing.lua", "h",
+                                    80, io, 100, out);
+    CHECK_FALSE(r5.error.empty());
+    CHECK_FALSE(r5.verified);
 }
 
 TEST_CASE("http_request_ex sends bodies, headers and UA overrides") {

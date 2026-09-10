@@ -87,7 +87,16 @@ struct VulnCheckProbe {
 struct VulnCheck {
     std::vector<VulnCheckProbe> probes;
 
-    bool empty() const { return probes.empty(); }
+    // Script-based check (plugins/checks/<file>): a Lua verify(ctx) function
+    // returning {verified=bool, evidence=string}. Covers what HTTP probes
+    // cannot express: binary protocols (Redis RESP), chunked request
+    // framing (Jenkins CLI), multi-request correlation.
+    std::string script;
+    // false -> the probe changes state (e.g. a POST) and is skipped in
+    // --safe mode regardless of transport.
+    bool safe = true;
+
+    bool empty() const { return script.empty() && probes.empty(); }
 };
 
 struct Finding {

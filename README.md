@@ -97,7 +97,7 @@ Sleipnir — инструмент аудита, разработанный в у
 <tr><td><b>Скан портов</b></td><td>TCP connect-скан по умолчанию; <code>--syn</code> — half-open скан на raw-сокетах (Linux, root/CAP_NET_RAW, с автоматическим fallback на connect); <code>--udp</code> — UDP-скан с probe-нагрузками для 13 сервисов (DNS, NTP, SNMP, TFTP, SSDP, mDNS, memcached…), статусы open/closed/filtered во всех отчётах; nmap-профили темпа <code>-T0…-T5</code> с адаптивным backoff'ом</td></tr>
 <tr><td><b>Fingerprinting</b></td><td>Декларативная таблица проб в духе nmap: NULL-проба + активные пробы (HTTP, Redis, PostgreSQL, MongoDB, IRC) и бинарные протоколы (MySQL, VNC, telnet); 12+ типов сервисов, извлечение продукта и версии</td></tr>
 <tr><td><b>CVE-матчинг</b></td><td>Локальная база: <b>31 продукт, 95 записей</b> (OpenSSH, vsftpd, Apache, nginx, OpenSSL, MySQL, PostgreSQL, Redis, Tomcat, PHP, WordPress, Jenkins, Grafana, Elasticsearch, CouchDB, Webmin, Exchange…), constraint-язык версий (<code>&lt;9.8p1</code>, <code>&gt;=1.0 &lt;2.0</code>); стек технологий собирается из <code>Server</code> и <code>X-Powered-By</code></td></tr>
-<tr><td><b>Активная верификация</b></td><td>Находки CVE — не приговор, а версия-подозрение: запись в базе может нести блок <code>check</code> (HTTP-пробы с подтверждющими маркерами), и только ответ с маркером, который защищённая цель дать не может, повышает находку до <b>confirmed</b> (с evidence-сниппетом); иначе она остаётся <b>potential</b>. Встроенный универсальный детект Log4Shell (CVE-2021-44228) — JNDI-канарейка в заголовках с доказательством вычисления (не сырого отражения). POST-пробы гейтятся режимом <code>--safe</code>; <code>--no-verify</code> отключает стадию целиком</td></tr>
+<tr><td><b>Активная верификация</b></td><td>Находки CVE — не приговор, а версия-подозрение: запись в базе может нести блок <code>check</code> — inline HTTP-пробы с подтверждающими маркерами (<code>@header:Имя:подстрока</code> — маркер в заголовке ответа) или ссылку на Lua-скрипт <code>plugins/checks/*.lua</code> для не-HTTP протоколов и экзотики (RESP/EVAL для Redis, chunked-POST для Jenkins CLI). Только ответ с маркером, который защищённая цель дать не может, повышает находку до <b>confirmed</b> (с evidence-сниппетом); иначе она остаётся <b>potential</b>. 11 CVE-проверок из коробки (Apache 41773/42013, php-cgi 1823, WordPress REST 5487, Grafana 43798, Webmin 15107, Elasticsearch Groovy 1427, BIG-IP TMUI 5902, Redis sandbox 0543, Jenkins CLI 23897) + встроенный детект Log4Shell (CVE-2021-44228). POST-пробы и «state-changing» скрипты гейтятся режимом <code>--safe</code>; <code>--no-verify</code> отключает стадию целиком</td></tr>
 <tr><td><b>TLS-аудит</b></td><td>Хэндшейк на TLS-портах с SNI; сертификат: срок (+окно 14 дней), самоподписанность, доверие цепочке, соответствие имени; активный детект TLS 1.0/1.1/SSL 3.0</td></tr>
 <tr><td><b>HTTP-аудит</b></td><td>Раскрытие версии в <code>Server</code> и <code>X-Powered-By</code>, directory listing, security-заголовки (CSP, XCTO, XFO), пермиссивная CORS, cookie без Secure/HttpOnly/SameSite, чувствительные пути (<code>/.git</code>, <code>/.env</code>, <code>/.aws/credentials</code>, <code>/phpinfo.php</code>…), методы TRACE/OPTIONS</td></tr>
 <tr><td><b>Web-app probes</b></td><td>Контентные проверки приложений: GraphQL introspection, Spring Boot actuator, OpenAPI/Swagger-документация, <code>package.json</code> в web-root, PHPUnit eval-stdin RCE (CVE-2017-9841, POST — гейтится <code>--safe</code>), ограниченный SQLi-детект по ошибкам драйверов БД (строгие маркеры, без ложных срабатываний на 500-страницах)</td></tr>
@@ -275,11 +275,11 @@ HTML-отчёт — самодостаточный документ с inline-CS
 
 ## Мок-лаборатория
 
-Девятнадцать TCP-слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации — включая пары «уязвимый/пропатченный» для проверки стадии верификации, — плюс UDP-сервисы (SSDP, mDNS, memcached) и тот же SSH/HTTP-пары на `[::1]` для IPv6-прогонов:
+Двадцать восемь TCP-слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации — включая пары «уязвимый/пропатченный» для проверки стадии верификации, — плюс UDP-сервисы (SSDP, mDNS, memcached) и тот же SSH/HTTP-пары на `[::1]` для IPv6-прогонов:
 
 ```bash
 python3 tools/mocklab/mock_services.py
-sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080-8089,8443 -f --report report.html
+sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,6381,8080-8095,8443 -f --report report.html
 
 # UDP-скан: SSDP и mDNS отвечают, memcached отдаёт VERSION по UDP-фрейму,
 # закрытый SNMP показывает статус closed (ICMP port unreachable)
@@ -298,17 +298,24 @@ sleipnir scan ::1 -p 2201,8080
 | 2501 | SMTP | Postfix, открытый relay + VRFY | плагины smtp_openrelay, smtp_vrfy |
 | 2502 | SMTP | Postfix, relay закрыт, VRFY отключён | ничего — **негативный тест** |
 | 2503 | echo | отказ от payload > 1024 байт | robustness → critical |
-| 6380 | Redis | Redis 6.0.16 без аутентификации | CVE-2022-0543 + плагин (critical) |
+| 6380 | Redis | Redis 6.0.16 без аутентификации, дырявый Lua-sandbox (EVAL → `table: 0x..`) | CVE-2022-0543 **verified (скрипт)** + плагин (critical) |
+| 6381 | Redis-hardened | тот же 6.0.16, sandbox исправлен (EVAL → nil) | CVE-2022-0543 остаётся **potential** — негативный тест |
 | 8080 | HTTP | Apache 2.4.49, dir listing, `/.git`, `/.env`, открытый `.%2e`-traversal | CVE-2021-41773 **verified** + builtin |
-| 8081 | WordPress | WP 5.8.1 / PHP 5.4.1 / nginx 1.18.0, REST-пользователи, CORS-рефлексия, php-cgi `?-s` | CVE-2012-1823 **verified** + CVE nginx/PHP/WP (potential) + 3 плагина |
+| 8081 | WordPress | WP 4.7 / PHP 5.4.1 / nginx 1.18.0, REST-пользователи, CORS-рефлексия, php-cgi `?-s` | CVE-2012-1823 и CVE-2017-5487 **verified** + CVE nginx/PHP/WP (potential) + 3 плагина |
 | 8082 | SPA | GraphQL introspection, Spring actuator, OpenAPI, `package.json`, SQL-ошибка, вычисление JNDI в заголовках | web-app probes + **Log4Shell verified** |
 | 8083 | VulnWeb | отражённый XSS, POST /login без CSRF, traversal, открытый редирект, SSTI в /render, SSRF в /fetch, XXE в /comment | краулер: XSS/traversal/SSTI/XXE (confirmed), SSRF (**potential**), redirect, CSRF |
 | 8084 | Apache-hardened | Apache 2.4.49, traversal закрыт | CVE-2021-41773 остаётся **potential** — негативный тест |
-| 8085 | PHP-hardened | тот же стек, php-cgi пропатчен | CVE-2012-1823 остаётся **potential** — негативный тест |
+| 8085 | PHP-hardened | тот же стек, php-cgi пропатчен, REST users требует auth | CVE-2012-1823 и CVE-2017-5487 остаются **potential** — негативный тест |
 | 8086 | Grafana-hardened | Grafana 8.3.0, plugin-роут исправлен | CVE-2021-43798 остаётся **potential** — негативный тест |
 | 8087 | Webmin-hardened | MiniServ 1.910, CGI отвергает неавторизованных | CVE-2019-15107 остаётся **potential** — негативный тест |
 | 8088 | Grafana | Grafana 8.3.0, `/public/plugins/..%2f` traversal | CVE-2021-43798 **verified** |
 | 8089 | Webmin | MiniServ 1.910, инъекция в password_change.cgi (POST) | CVE-2019-15107 **verified** (в `--safe` — potential) |
+| 8090 | Elasticsearch | 1.4.0, Groovy script_fields включены | CVE-2015-1427 **verified** (POST, `--safe` гейтит) |
+| 8091 | ES-hardened | тот же 1.4.0, inline-скрипты отключены | CVE-2015-1427 остаётся **potential** — негативный тест |
+| 8092 | BIG-IP | BigIP 13.1.0, TMUI fileRead traversal | CVE-2020-5902 **verified** |
+| 8093 | BIG-IP-hardened | тот же 13.1.0 с hotfix | CVE-2020-5902 остаётся **potential** — негативный тест |
+| 8094 | Jenkins | 2.426, CLI argument expansion (chunked POST) | CVE-2024-23897 **verified (скрипт)** |
+| 8095 | Jenkins-hardened | тот же 2.426, CLI закрыт | CVE-2024-23897 остаётся **potential** — негативный тест |
 | 8443 | HTTPS | Apache 2.4.50 поверх TLS, самоподписанный сертификат (CN=mock.lab, 1 день), `.%%32%65`-bypass | CVE-2021-42013 **verified поверх TLS** + TLS-находки |
 
 UDP-сервисы (флаг `--udp`): `1900/udp` SSDP (отвечает на M-SEARCH), `5353/udp` mDNS (PTR-ответ с флагом QR), `11211/udp` memcached (UDP-фрейм + `VERSION`). Порты >1024, чтобы лаба работала без root.
@@ -344,7 +351,7 @@ UDP-сервисы (флаг `--udp`): `1900/udp` SSDP (отвечает на M-
 ## Расширение и ограничения
 
 - **Новые сервисы/сигнатуры** — проба и regex-правила в `data/service_probes.json` (без перекомпиляции; специфичные правила — раньше общих).
-- **Новые CVE** — записи в `data/cve_map.json`: ключ — алиас баннера, `aliases` — написания, `vulns` — `{cve, affected, cvss, summary}`; опциональный `check` — `{probes: [{method, path, body, markers, not_markers, headers}]}` для активной верификации (маркеры — строки, которые защищённая цель не вернёт; пробы должны быть read-only).
+- **Новые CVE** — записи в `data/cve_map.json`: ключ — алиас баннера, `aliases` — написания, `vulns` — `{cve, affected, cvss, summary}`; опциональный `check` — либо `{probes: [{method, path, body, markers, not_markers, headers}]}` для HTTP-проб (маркер `@header:Имя:подстрока` ищет подтверждение в заголовке ответа), либо `{script: "file.lua", safe: false}` со ссылкой на Lua-скрипт из `plugins/checks/` — функция `verify(ctx)` с API плагинов (`tcp_connect`, `http_get`, ...) возвращает `{verified, evidence}`. Пробы должны быть read-only; POST-пробы и `safe: false`-скрипты не выполняются в `--safe`.
 - **Новые проверки** — Lua-плагин; то, что должно быть быстрым и компилируемым, — в `checks.hpp`.
 
 Известные рамки: сигнатурный детект (версию, скрытую в баннере, не матчит), без аутентификации в приложениях, UDP-скан ведёт себя как `open|filtered` на молчащих портах (без активных RPC-проб), SYN-скан требует Linux и root/CAP_NET_RAW (иначе автоматический fallback на connect), SMB/RPC не пробируются. Дорожная карта: master/worker-раздача целей по сети, TLS-аудит всех портов, экспорт SARIF, diff между запусками.
