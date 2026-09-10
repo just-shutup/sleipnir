@@ -13,3 +13,6 @@ build/
 report.json
 report.html
 *.tar.gz
+
+# python bytecode
+__pycache__/

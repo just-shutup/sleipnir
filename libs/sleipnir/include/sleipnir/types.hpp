@@ -17,6 +17,21 @@ Severity severity_from_string(const std::string& s); // unknown -> Info
 
 enum class PortStatus { Open, Closed, Filtered };
 
+const char* status_name(PortStatus s); // "open" / "closed" / "filtered"
+
+// Timing profile (-T0..-T5, nmap-style): base pacing, timeouts and worker
+// caps. The engine additionally adapts the delay at runtime (backoff when
+// connects hit the timeout, recovery when they complete fast).
+struct TimingProfile {
+    int delay_ms;         // base per-worker pause between jobs
+    int timeout_ms;       // per-operation timeout
+    int max_threads;      // worker pool cap
+    int adaptive_ceiling; // upper bound for the adaptive delay
+};
+
+// t: 0 (paranoid) .. 5 (insane); values outside 0..5 clamp to 3.
+TimingProfile timing_profile(int t);
+
 // Report-facing TLS facts (handshake + certificate) for a single endpoint.
 struct TlsInfo {
     std::string protocol;    // negotiated, e.g. "TLSv1.2"
@@ -85,7 +100,17 @@ struct ScanConfig {
     // Safety and pacing controls.
     bool safe = false;         // non-intrusive checks only (fuzzing off)
     int delay_ms = 0;          // pause between jobs per worker
+    int timing = 3;            // -T0..-T5 profile (3 = default)
     std::string user_agent = "Sleipnir/0.1 (vulnerability scanner)";
+
+    // SYN (stealth) scan for the port phase; requires root/CAP_NET_RAW on
+    // Linux and falls back to the connect scan otherwise.
+    bool syn_scan = false;
+
+    // UDP service scan (opt-in): probe-driven with per-port payloads.
+    bool udp_scan = false;
+    std::string udp_ports =
+        "53,69,123,137,161,162,500,514,4500,1900,5353,11211";
 
     // Web crawler and active application probes.
     bool no_crawl = false;
@@ -95,6 +120,12 @@ struct ScanConfig {
 
     // CI gate (--fail-on SEVERITY): empty -> disabled.
     std::string fail_on;
+
+    // True when the user passed the option explicitly (timing profiles only
+    // fill unset values).
+    bool threads_explicit = false;
+    bool timeout_explicit = false;
+    bool delay_explicit = false;
 };
 
 } // namespace sln

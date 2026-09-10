@@ -6,7 +6,10 @@
 #include "sleipnir/http_client.hpp"
 #include "sleipnir/cve_db.hpp"
 #include "sleipnir/fuzz.hpp"
+#include "sleipnir/syn_scan.hpp"
 #include "sleipnir/targets.hpp"
+#include "sleipnir/types.hpp"
+#include "sleipnir/udp_scan.hpp"
 #include "sleipnir/version.hpp"
 
 #include <algorithm>
@@ -445,4 +448,155 @@ TEST_CASE("chunked transfer decoding") {
 
     // truncated stream: keep whatever arrived
     CHECK(decode_chunked("5\r\nhe") == "he");
+}
+
+TEST_CASE("target expansion handles IPv6 literals and brackets") {
+    // bare v6 literal passes through
+    auto hosts = expand_targets({"::1"});
+    REQUIRE(hosts.size() == 1);
+    CHECK(hosts[0] == "::1");
+
+    // URL-style bracketed form loses the brackets
+    CHECK(expand_targets({"[2001:db8::1]"})[0] == "2001:db8::1");
+
+    // a path after the bracketed host is dropped, scheme too
+    CHECK(expand_targets({"http://[::1]/admin"})[0] == "::1");
+}
+
+TEST_CASE("target expansion handles IPv6 CIDR") {
+    // /126 spans exactly 4 addresses, network bits preserved
+    auto net = expand_targets({"2001:db8::/126"});
+    REQUIRE(net.size() == 4);
+    CHECK(net[0] == "2001:db8::");
+    CHECK(net[1] == "2001:db8::1");
+    CHECK(net[2] == "2001:db8::2");
+    CHECK(net[3] == "2001:db8::3");
+
+    // /128 is a single address written as a range
+    auto single = expand_targets({"::1/128"});
+    REQUIRE(single.size() == 1);
+    CHECK(single[0] == "::1");
+
+    // v4 and v6 targets mix in one sorted, deduplicated list
+    auto mixed = expand_targets({"10.0.0.1", "::1", "10.0.0.1"});
+    REQUIRE(mixed.size() == 2);
+    CHECK(mixed[0] == "10.0.0.1");
+    CHECK(mixed[1] == "::1");
+
+    CHECK_THROWS_AS(expand_targets({"::1/129"}), std::runtime_error);
+    // wider than /64 would span more than 2^64 hosts
+    CHECK_THROWS_AS(expand_targets({"2001:db8::/63"}), std::runtime_error);
+}
+
+TEST_CASE("port status names cover every state") {
+    CHECK(std::string(status_name(PortStatus::Open)) == "open");
+    CHECK(std::string(status_name(PortStatus::Closed)) == "closed");
+    CHECK(std::string(status_name(PortStatus::Filtered)) == "filtered");
+}
+
+TEST_CASE("timing profiles and clamping") {
+    auto t0 = timing_profile(0);
+    CHECK(t0.delay_ms == 400);
+    CHECK(t0.timeout_ms == 10000);
+    CHECK(t0.max_threads == 8);
+
+    auto t3 = timing_profile(3);
+    CHECK(t3.delay_ms == 0);
+    CHECK(t3.timeout_ms == 2500);
+    CHECK(t3.max_threads == 64);
+
+    auto t5 = timing_profile(5);
+    CHECK(t5.timeout_ms < t3.timeout_ms);
+    CHECK(t5.max_threads > t3.max_threads);
+
+    // out-of-range profiles clamp to normal (-T3)
+    CHECK(timing_profile(9).delay_ms == t3.delay_ms);
+    CHECK(timing_profile(-1).timeout_ms == t3.timeout_ms);
+}
+
+TEST_CASE("ones-complement checksum (RFC 1071)") {
+    const uint8_t zeros2[] = {0, 0};
+    CHECK(ones_complement_checksum(zeros2, 2) == 0xffff);
+
+    // hand-computed: 0x0001 + 0xf203 = 0xf204 -> ~0xf204 = 0x0dfb
+    const uint8_t v[] = {0x00, 0x01, 0xf2, 0x03};
+    CHECK(ones_complement_checksum(v, 4) == 0x0dfb);
+
+    // odd length: the trailing byte is padded into the high position
+    const uint8_t odd[] = {0x01, 0x02, 0x03};
+    CHECK(ones_complement_checksum(odd, 3) == 0xfbfd);
+
+    // RFC 1071 property: data + its checksum sums to zero
+    std::vector<uint8_t> msg(32);
+    for (size_t i = 0; i < msg.size(); ++i)
+        msg[i] = static_cast<uint8_t>(i * 7);
+    uint16_t c = ones_complement_checksum(msg.data(), msg.size());
+    msg.push_back(static_cast<uint8_t>(c >> 8));
+    msg.push_back(static_cast<uint8_t>(c & 0xff));
+    CHECK(ones_complement_checksum(msg.data(), msg.size()) == 0);
+}
+
+TEST_CASE("SYN reply classification by TCP flags") {
+    CHECK(syn_status_from_flags(kTcpSyn | kTcpAck) == PortStatus::Open);
+    CHECK(syn_status_from_flags(kTcpSyn) == PortStatus::Filtered);
+    CHECK(syn_status_from_flags(kTcpRst) == PortStatus::Closed);
+    CHECK(syn_status_from_flags(kTcpRst | kTcpAck) == PortStatus::Closed);
+    CHECK(syn_status_from_flags(0) == PortStatus::Filtered);
+    CHECK(syn_status_from_flags(kTcpFin | kTcpPsh) == PortStatus::Filtered);
+}
+
+TEST_CASE("UDP probe table") {
+    const UdpProbe* snmp = udp_probe_for(161);
+    REQUIRE(snmp != nullptr);
+    CHECK(std::string(snmp->service) == "snmp");
+    // community string "public" is embedded in the payload
+    CHECK(std::string(snmp->payload_hex).find("7075626c6963") !=
+          std::string::npos);
+
+    CHECK(udp_probe_for(11211) != nullptr);
+    CHECK(udp_probe_for(1) == nullptr);
+}
+
+TEST_CASE("UDP reply classification") {
+    // DNS/mDNS: QR bit set in the flags word
+    std::string dns_resp = std::string("\x00\x01\x81\x80", 4);
+    CHECK(udp_classify(53, dns_resp) == "domain");
+    CHECK(udp_classify(5353, dns_resp) == "mdns");
+    // a query (QR=0) is not a service reply
+    CHECK(udp_classify(53, std::string("\x00\x01\x01\x00", 4)).empty());
+
+    // NTP: 48-byte server reply, mode 4
+    std::string ntp(48, '\0');
+    ntp[0] = 0x24; // LI=0, VN=4, Mode=4
+    CHECK(udp_classify(123, ntp) == "ntp");
+    CHECK(udp_classify(123, std::string(40, '\0')).empty()); // too short
+
+    // SNMP: BER SEQUENCE tag
+    CHECK(udp_classify(161, std::string("\x30\x29\x02\x01\x00", 5)) == "snmp");
+    CHECK(udp_classify(162, std::string("\x30\x00", 2)) == "snmp");
+
+    // TFTP: opcode 3 (DATA) in the first two bytes
+    CHECK(udp_classify(69, std::string("\x00\x03\x00\x01", 4)) == "tftp");
+    CHECK(udp_classify(69, std::string("\x00\x42", 2)).empty());
+
+    // SSDP: HTTP-shaped reply
+    CHECK(udp_classify(1900, "HTTP/1.1 200 OK\r\nST: upnp:rootdevice\r\n") ==
+          "ssdp");
+    CHECK(udp_classify(1900, "not http").empty());
+
+    // memcached: 8-byte UDP frame header + VERSION
+    CHECK(udp_classify(11211, std::string(8, '\0') + "VERSION 1.6.0\r\n") ==
+          "memcached");
+    CHECK(udp_classify(11211, std::string(8, '\0') + "bogus").empty());
+
+    // reply-shape catch-alls
+    CHECK(udp_classify(137, "any reply") == "netbios-ns");
+    CHECK(udp_classify(500, "any reply") == "isakmp");
+    CHECK(udp_classify(4500, "any reply") == "isakmp");
+    CHECK(udp_classify(514, "any reply") == "syslog");
+    CHECK(udp_classify(1701, "any reply") == "l2tp");
+
+    // empty reply and ports with no expectations
+    CHECK(udp_classify(53, "").empty());
+    CHECK(udp_classify(8080, "whatever").empty());
 }

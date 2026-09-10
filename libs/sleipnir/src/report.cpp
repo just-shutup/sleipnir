@@ -74,8 +74,14 @@ void print_console_report(const ResultCollector& results,
     std::cout << "hosts scanned : " << stats.hosts << "\n"
               << "jobs done     : " << stats.jobs_done.load() << "/"
               << stats.jobs_total << "\n"
-              << "open ports    : " << stats.open_ports.load() << "\n"
-              << "findings      : " << findings.size() << "\n"
+              << "open ports    : " << stats.open_ports.load() << "\n";
+    if (stats.closed_ports.load())
+        std::cout << "closed ports  : " << stats.closed_ports.load()
+                  << "\n";
+    if (stats.filtered_ports.load())
+        std::cout << "filtered      : " << stats.filtered_ports.load()
+                  << " (no reply — open|filtered)\n";
+    std::cout << "findings      : " << findings.size() << "\n"
               << C_DIM << "elapsed       : " << elapsed_seconds << "s"
               << C_RESET << "\n\n";
 
@@ -84,15 +90,22 @@ void print_console_report(const ResultCollector& results,
         return a.port < b.port;
     });
     for (const auto& p : ports) {
-        std::cout << C_GREEN << "  " << p.host << ":" << p.port << C_RESET
-                  << "  " << p.service;
-        if (!p.product.empty())
-            std::cout << " " << C_DIM << p.product
-                      << (p.version.empty() ? "" : "/" + p.version) << C_RESET;
-        if (p.tls)
-            std::cout << "  " << C_DIM << "[" << p.tls->protocol << "]"
-                      << C_RESET;
-        std::cout << "\n";
+        if (p.status == PortStatus::Open) {
+            std::cout << C_GREEN << "  " << p.host << ":" << p.port << C_RESET
+                      << "  " << p.service;
+            if (!p.product.empty())
+                std::cout << " " << C_DIM << p.product
+                          << (p.version.empty() ? "" : "/" + p.version) << C_RESET;
+            if (p.tls)
+                std::cout << "  " << C_DIM << "[" << p.tls->protocol << "]"
+                          << C_RESET;
+            std::cout << "\n";
+        } else {
+            const char* color =
+                p.status == PortStatus::Filtered ? C_YELLOW : C_DIM;
+            std::cout << color << "  " << p.host << ":" << p.port << C_RESET
+                      << "  " << status_name(p.status) << "\n";
+        }
     }
     if (!ports.empty()) std::cout << "\n";
 
@@ -129,7 +142,8 @@ void print_console_report(const ResultCollector& results,
 bool write_json_report(const std::string& path,
                        const std::vector<PortResult>& ports,
                        const std::vector<Finding>& findings,
-                       const ScanConfig& cfg, double elapsed_seconds) {
+                       const ScanStats& stats, const ScanConfig& cfg,
+                       double elapsed_seconds) {
     json report;
     report["meta"] = {
         {"tool", "sleipnir"},
@@ -145,7 +159,9 @@ bool write_json_report(const std::string& path,
     for (const auto& p : ports) unique_hosts.insert(p.host);
     report["stats"] = {
         {"hosts", unique_hosts.size()},
-        {"open_ports", ports.size()},
+        {"open_ports", stats.open_ports.load()},
+        {"closed_ports", stats.closed_ports.load()},
+        {"filtered_ports", stats.filtered_ports.load()},
         {"findings", findings.size()}};
 
     json jports = json::array();
@@ -153,7 +169,7 @@ bool write_json_report(const std::string& path,
         json j;
         j["host"] = p.host;
         j["port"] = p.port;
-        j["status"] = "open";
+        j["status"] = status_name(p.status);
         j["service"] = p.service;
         j["product"] = p.product;
         j["version"] = p.version;
@@ -232,7 +248,8 @@ std::string utc_timestamp() {
 bool write_html_report(const std::string& path,
                        const std::vector<PortResult>& ports,
                        const std::vector<Finding>& findings,
-                       const ScanConfig& cfg, double elapsed_seconds) {
+                       const ScanStats& stats, const ScanConfig& cfg,
+                       double elapsed_seconds) {
     // sort a local copy: severity first, then host/port
     std::vector<Finding> sorted = findings;
     std::sort(sorted.begin(), sorted.end(),
@@ -283,7 +300,7 @@ bool write_html_report(const std::string& path,
     };
     html << "<div class=\"cards\">\n";
     card(static_cast<int>(unique_hosts.size()), "Hosts");
-    card(static_cast<int>(ports.size()), "Open ports");
+    card(static_cast<int>(stats.open_ports.load()), "Open ports");
     card(static_cast<int>(sorted.size()), "Findings");
     card(by_sev[Severity::Critical], "Critical");
     card(by_sev[Severity::High], "High");
@@ -361,7 +378,8 @@ bool write_html_report(const std::string& path,
 bool write_report(const std::string& path,
                   const std::vector<PortResult>& ports,
                   const std::vector<Finding>& findings,
-                  const ScanConfig& cfg, double elapsed_seconds) {
+                  const ScanStats& stats, const ScanConfig& cfg,
+                  double elapsed_seconds) {
     std::string ext;
     size_t dot = path.rfind('.');
     if (dot != std::string::npos) {
@@ -369,8 +387,10 @@ bool write_report(const std::string& path,
         for (char& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
     if (ext == "html" || ext == "htm")
-        return write_html_report(path, ports, findings, cfg, elapsed_seconds);
-    return write_json_report(path, ports, findings, cfg, elapsed_seconds);
+        return write_html_report(path, ports, findings, stats, cfg,
+                                 elapsed_seconds);
+    return write_json_report(path, ports, findings, stats, cfg,
+                             elapsed_seconds);
 }
 
 } // namespace sln

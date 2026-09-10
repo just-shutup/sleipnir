@@ -2,6 +2,8 @@ add_library(sleipnir STATIC
     src/targets.cpp
     src/types.cpp
     src/netio.cpp
+    src/syn_scan.cpp
+    src/udp_scan.cpp
     src/tls_client.cpp
     src/tls_checks.cpp
     src/version.cpp

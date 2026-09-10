@@ -21,10 +21,17 @@ Every listener emulates a real service badly enough to trip the scanner:
                              (negative test: no findings)
   127.0.0.1:2503  CRASHY     echo service that DIES on a >1024-byte payload
                              (demonstrates the robustness module finding a crash)
+  127.0.0.1:1900/udp SSDP    answers M-SEARCH (UPnP device discovery)
+  127.0.0.1:5353/udp mDNS    answers PTR queries for _dns-sd services
+  127.0.0.1:11211/udp memcached UDP-framed VERSION reply
+  [::1]:2201,[::1]:8080     the SSH/HTTP pair bound on IPv6 loopback
+                             (for `scan ::1`)
 
 Usage:  python3 tools/mocklab/mock_services.py
 Then:   ./build/apps/sleipnir/sleipnir scan 127.0.0.1 \
             -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8443
+        ./build/apps/sleipnir/sleipnir scan 127.0.0.1 -p 1900 --udp \
+            --udp-ports 1900,5353,11211,161
 """
 
 import socket
@@ -482,6 +489,69 @@ class VulnWebHandler(BaseHTTPRequestHandler):
         pass
 
 
+# ---------------------------------------------------------------------------
+# UDP services (Sleipnir --udp probe targets; all ports >1024 so the lab
+# runs unprivileged)
+# ---------------------------------------------------------------------------
+
+class UdpSsdpHandler(socketserver.BaseRequestHandler):
+    """SSDP responder: answers M-SEARCH with a rootdevice NOTIFY-style
+    response (UPnP devices that leak over multicast unicast too)."""
+
+    def handle(self):
+        data, sock = self.request
+        if b"M-SEARCH" in data:
+            sock.sendto(
+                b"HTTP/1.1 200 OK\r\n"
+                b"CACHE-CONTROL: max-age=1800\r\n"
+                b"DATE: Mon, 01 Jan 2024 00:00:00 GMT\r\n"
+                b"EXT:\r\n"
+                b"LOCATION: http://127.0.0.1:8080/upnp/root.xml\r\n"
+                b"SERVER: Linux/5.4 UPnP/1.0 mocklab/1.0\r\n"
+                b"ST: upnp:rootdevice\r\n"
+                b"USN: uuid:2fac1234-31f8-11b4-a222-08002b34c003::upnp:rootdevice\r\n"
+                b"\r\n",
+                self.client_address,
+            )
+
+
+class UdpMdnsHandler(socketserver.BaseRequestHandler):
+    """mDNS responder: echoes the question back with the response flag set
+    and a PTR answer for _http._tcp.local."""
+
+    def handle(self):
+        data, sock = self.request
+        if len(data) < 12:
+            return
+        # response: same id, QR=1, one answer pointing at mocklab.local
+        answer = (
+            b"\x00\x00"      # name pointer to offset 0
+            b"\x00\x0c"      # PTR
+            b"\x00\x01"      # IN
+            b"\x00\x00\x00\x78"  # TTL 120
+            b"\x00\x0a"      # rdlength
+            b"\x08mocklab\x05local\x00"
+        )
+        resp = data[:2] + b"\x84\x00" + b"\x00\x00\x00\x00\x00\x01" + answer
+        sock.sendto(resp, self.client_address)
+
+
+class UdpMemcachedHandler(socketserver.BaseRequestHandler):
+    """memcached with UDP framing: replies VERSION to a framed 'version'."""
+
+    def handle(self):
+        data, sock = self.request
+        if len(data) >= 8 and data[8:].lower().startswith(b"version"):
+            header = data[:8]  # echo request id / counters
+            sock.sendto(header + b"VERSION 1.6.0\r\n", self.client_address)
+
+
+class UdpLabServer(socketserver.UDPServer):
+    allow_reuse_address = True
+
+
+# ---------------------------------------------------------------------------
+
 SERVICES = [
     ("ssh", 2201, SshHandler),
     ("ftp-vuln", 2101, FtpHandler),
@@ -496,6 +566,23 @@ SERVICES = [
     ("wordpress", 8081, WordPressHandler, LabHTTPServer),
     ("spa", 8082, SpaHandler, LabHTTPServer),
     ("vulnweb", 8083, VulnWebHandler, LabHTTPServer),
+]
+
+class Ipv6TcpServer(socketserver.ThreadingTCPServer):
+    address_family = socket.AF_INET6
+    allow_reuse_address = True
+
+
+# TCP services re-bound on IPv6 loopback so `scan ::1` has something to find.
+IPV6_SERVICES = [
+    ("ssh-v6", 2201, SshHandler),
+    ("http-v6", 8080, LabHTTPRequestHandler, Ipv6TcpServer),
+]
+
+UDP_SERVICES = [
+    ("ssdp", 1900, UdpSsdpHandler),
+    ("mdns", 5353, UdpMdnsHandler),
+    ("memcached", 11211, UdpMemcachedHandler),
 ]
 
 
@@ -537,6 +624,23 @@ def main():
         thread.start()
         servers.append(srv)
         print(f"[mocklab] {name:12s} listening on {HOST}:{port}")
+
+    for entry in IPV6_SERVICES:
+        name, port, handler = entry[0], entry[1], entry[2]
+        server_cls = entry[3] if len(entry) > 3 else Ipv6TcpServer
+        srv = server_cls(("::1", port), handler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        servers.append(srv)
+        print(f"[mocklab] {name:12s} listening on [::1]:{port}")
+
+    for entry in UDP_SERVICES:
+        name, port, handler = entry[0], entry[1], entry[2]
+        srv = UdpLabServer((HOST, port), handler)
+        thread = threading.Thread(target=srv.serve_forever, daemon=True)
+        thread.start()
+        servers.append(srv)
+        print(f"[mocklab] {name:12s} udp/{HOST}:{port}")
 
     print("[mocklab] ready. Ctrl+C to stop all services.")
     try:

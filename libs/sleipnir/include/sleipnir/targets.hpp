@@ -7,8 +7,9 @@
 
 namespace sln {
 
-// Expand "127.0.0.1,10.0.0.0/30,example.com" into a flat list of hosts.
-// CIDR ranges are expanded locally, hostnames are DNS-resolved.
+// Expand "127.0.0.1,10.0.0.0/30,2001:db8::/126,example.com" into a flat
+// list of hosts. IPv4 and IPv6 CIDR ranges are expanded locally, literals
+// pass through (brackets are stripped), hostnames are DNS-resolved (A/AAAA).
 // Returns the list plus a human-readable error for unresolvable entries.
 // Throws std::runtime_error on a malformed spec.
 std::vector<std::string> expand_targets(const std::vector<std::string>& specs,

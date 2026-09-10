@@ -162,4 +162,137 @@ asio::ip::tcp::socket TcpClient::detach() {
     return s;
 }
 
+// ---------------------------------------------------------------------------
+// UdpClient
+// ---------------------------------------------------------------------------
+
+UdpClient::UdpClient(asio::io_context& io) : io_(io), socket_(io) {}
+
+void UdpClient::run_round() {
+    io_.restart();
+    io_.run();
+}
+
+bool UdpClient::connect(const std::string& host, uint16_t port,
+                        int timeout_ms) {
+    close();
+
+    asio::ip::udp::endpoint endpoint;
+    try {
+        endpoint = {asio::ip::make_address(host), port};
+    } catch (const std::exception&) {
+        // not a raw IP -> resolve (A and AAAA both work)
+        asio::ip::udp::resolver resolver(io_);
+        std::optional<asio::ip::udp::resolver::results_type> resolved;
+        asio::steady_timer resolve_timer(io_);
+        resolve_timer.expires_after(std::chrono::milliseconds(timeout_ms));
+        bool resolve_done = false;
+        resolver.async_resolve(host, std::to_string(port),
+                               [&](std::error_code ec, auto results) {
+                                   if (resolve_done) return;
+                                   resolve_done = true;
+                                   if (!ec) resolved = std::move(results);
+                                   resolve_timer.cancel();
+                               });
+        resolve_timer.async_wait([&](std::error_code) {
+            if (resolve_done) return;
+            resolve_done = true;
+            resolver.cancel();
+        });
+        run_round();
+        if (!resolved || resolved->empty()) return false;
+        endpoint = resolved->begin()->endpoint();
+    }
+
+    asio::steady_timer timer(io_);
+    timer.expires_after(std::chrono::milliseconds(timeout_ms));
+    bool done = false;
+    bool ok = false;
+
+    socket_.async_connect(endpoint, [&](std::error_code ec) {
+        if (done) return;
+        done = true;
+        ok = !ec;
+        timer.cancel();
+    });
+    timer.async_wait([&](std::error_code) {
+        if (done) return;
+        done = true;
+        std::error_code ignored;
+        socket_.close(ignored);
+    });
+    run_round();
+    return ok;
+}
+
+bool UdpClient::send(std::string_view data) {
+    if (!socket_.is_open() || data.empty()) return false;
+    asio::steady_timer timer(io_);
+    timer.expires_after(std::chrono::milliseconds(2000));
+    bool done = false;
+    bool ok = false;
+    socket_.async_send(asio::buffer(data.data(), data.size()),
+                       [&](std::error_code ec, size_t) {
+                           if (done) return;
+                           done = true;
+                           ok = !ec;
+                           timer.cancel();
+                       });
+    timer.async_wait([&](std::error_code) {
+        if (done) return;
+        done = true;
+        std::error_code ignored;
+        socket_.close(ignored);
+    });
+    run_round();
+    return ok;
+}
+
+UdpRecv UdpClient::recv(int wait_ms, size_t max_bytes) {
+    if (!socket_.is_open()) return {};
+    std::string out;
+    out.resize(max_bytes);
+
+    asio::steady_timer timer(io_);
+    timer.expires_after(std::chrono::milliseconds(wait_ms));
+    bool done = false;
+    bool refused = false;
+    size_t nread = 0;
+
+    socket_.async_receive(
+        asio::buffer(out.data(), out.size()),
+        [&](std::error_code ec, size_t n) {
+            if (done) return;
+            done = true;
+            if (!ec) {
+                nread = n;
+            } else if (ec == asio::error::connection_refused ||
+                       ec == asio::error::connection_reset ||
+                       ec == asio::error::no_permission) {
+                // ICMP port unreachable (Linux delivers it as ECONNREFUSED
+                // on the connected socket; some kernels send EACCES for
+                // administratively prohibited).
+                refused = true;
+            }
+            timer.cancel();
+        });
+    timer.async_wait([&](std::error_code) {
+        if (done) return;
+        done = true; // timeout -> filtered / open|filtered
+        std::error_code ignored;
+        socket_.cancel(ignored);
+    });
+    run_round();
+
+    out.resize(nread);
+    return {std::move(out), refused};
+}
+
+void UdpClient::close() {
+    if (socket_.is_open()) {
+        std::error_code ignored;
+        socket_.close(ignored);
+    }
+}
+
 } // namespace sln

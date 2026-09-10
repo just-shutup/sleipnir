@@ -95,6 +95,20 @@ int run_scan(sln::ScanConfig& cfg, const char* argv0) {    if (cfg.targets.empty
         cfg.fuzz = false;
     }
 
+    // Timing profile: fill unset options from the profile; explicitly given
+    // values win.
+    if (cfg.timing != 3) {
+        sln::TimingProfile prof = sln::timing_profile(cfg.timing);
+        std::cout << "[timing] -T" << cfg.timing << ": base delay "
+                  << prof.delay_ms << " ms, timeout " << prof.timeout_ms
+                  << " ms, max " << prof.max_threads << " workers, adaptive "
+                  << "backoff up to " << prof.adaptive_ceiling << " ms\n";
+        if (!cfg.timeout_explicit) cfg.timeout_ms = prof.timeout_ms;
+        if (!cfg.threads_explicit)
+            cfg.threads = std::min(cfg.threads, prof.max_threads);
+        if (!cfg.delay_explicit) cfg.delay_ms = prof.delay_ms;
+    }
+
     std::filesystem::path exe_loc = exe_dir(argv0);
     cfg.plugins_dir = auto_dir(cfg.plugins_dir.c_str(), "plugins", exe_loc);
     cfg.data_dir = auto_dir(cfg.data_dir.c_str(), "data", exe_loc);
@@ -127,7 +141,8 @@ int run_scan(sln::ScanConfig& cfg, const char* argv0) {    if (cfg.targets.empty
         if (!cfg.report_path.empty()) {
             bool ok = sln::write_report(cfg.report_path,
                                         engine.collector().ports(),
-                                        engine.collector().findings(), cfg,
+                                        engine.collector().findings(),
+                                        engine.collector().stats(), cfg,
                                         elapsed);
             std::cout << (ok ? "Report written to " + cfg.report_path
                              : "FAILED to write " + cfg.report_path)
@@ -197,9 +212,16 @@ std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
                      "Ports: 'top100', list or ranges (e.g. 80,443,1000-2000)")
         ->capture_default_str();
     scan->add_option("-t,--threads", cfg.threads, "Worker threads")
+        ->capture_default_str()
+        ->each([&](const std::string&) { cfg.threads_explicit = true; });
+    scan->add_option("-T,--timing", cfg.timing,
+                     "Timing profile 0-5 (0=paranoid, 3=normal, 5=insane); "
+                     "sets delays/timeouts/thread cap and enables adaptive "
+                     "backoff on filtered targets")
         ->capture_default_str();
     scan->add_option("--timeout", cfg.timeout_ms, "Per-operation timeout, ms")
-        ->capture_default_str();
+        ->capture_default_str()
+        ->each([&](const std::string&) { cfg.timeout_explicit = true; });
     scan->add_flag("--no-plugins", cfg.disable_plugins,
                    "Disable the Lua plugin engine");
     scan->add_option("--data", cfg.data_dir, "Data directory (probes, CVE db)")
@@ -220,12 +242,24 @@ std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
                      "Ports where a TLS handshake is attempted")
         ->capture_default_str();
 
+    // Port-scan phase selection
+    scan->add_flag("--syn", cfg.syn_scan,
+                   "SYN (stealth) port scan via raw sockets (Linux, needs "
+                   "root/CAP_NET_RAW; falls back to connect())");
+    scan->add_flag("--udp", cfg.udp_scan,
+                   "UDP service scan (DNS/NTP/SNMP/TFTP/SSDP/mDNS/memcached "
+                   "probes)");
+    scan->add_option("--udp-ports", cfg.udp_ports,
+                     "Ports for --udp; list or ranges")
+        ->capture_default_str();
+
     // Safety and pacing
     scan->add_flag("--safe", cfg.safe,
                    "Non-intrusive checks only (disables fuzzing)");
     scan->add_option("--delay", cfg.delay_ms,
                      "Pause between jobs per worker, ms")
-        ->capture_default_str();
+        ->capture_default_str()
+        ->each([&](const std::string&) { cfg.delay_explicit = true; });
     scan->add_option("--user-agent", cfg.user_agent, "HTTP User-Agent header")
         ->capture_default_str();
 
@@ -309,6 +343,10 @@ void show_settings(const sln::ScanConfig& cfg) {
     std::cout << "ports          : " << cfg.ports << "\n"
               << "threads        : " << cfg.threads << "\n"
               << "timeout_ms     : " << cfg.timeout_ms << "\n"
+              << "timing         : -T" << cfg.timing << "\n"
+              << "syn_scan       : " << (cfg.syn_scan ? "on" : "off") << "\n"
+              << "udp_scan       : " << (cfg.udp_scan ? "on" : "off")
+              << (cfg.udp_scan ? " (" + cfg.udp_ports + ")" : "") << "\n"
               << "fuzz           : " << (cfg.fuzz ? "on" : "off") << "\n"
               << "fuzz_max_len   : " << cfg.fuzz_max_len << "\n"
               << "fuzz_delay_ms  : " << cfg.fuzz_delay_ms << "\n"

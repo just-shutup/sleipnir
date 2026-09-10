@@ -20,15 +20,6 @@ std::string u32_to_ip(uint32_t v) {
     return asio::ip::address_v4(v).to_string();
 }
 
-bool is_ipv4_literal(const std::string& s) {
-    static const std::regex re(R"(^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$)");
-    std::smatch m;
-    if (!std::regex_match(s, m, re)) return false;
-    for (int i = 1; i <= 4; ++i)
-        if (std::stoi(m[i].str()) > 255) return false;
-    return true;
-}
-
 std::string resolve_host(const std::string& host) {
     asio::io_context io;
     asio::ip::tcp::resolver resolver(io);
@@ -37,7 +28,8 @@ std::string resolve_host(const std::string& host) {
     try {
         results = resolver.resolve(host, "");
         if (results.begin() != results.end()) {
-            // prefer IPv4 (we only scan over v4)
+            // prefer IPv4 when the name has both A and AAAA records;
+            // IPv6-only hosts resolve to their v6 address and scan over v6
             for (const auto& entry : results) {
                 if (entry.endpoint().address().is_v4())
                     return entry.endpoint().address().to_string();
@@ -49,6 +41,35 @@ std::string resolve_host(const std::string& host) {
     }
     throw std::runtime_error("cannot resolve host '" + host + "'" +
                              (err.empty() ? "" : ": " + err));
+}
+
+// Expands an IPv6 CIDR "2001:db8::/64" (prefix 0..128). Prefixes below /64
+// are rejected outright: even a /63 is 2^65 hosts, far beyond any sane scan.
+void expand_v6_cidr(std::set<std::string>& out, const std::string& addr,
+                    int prefix, const std::string& raw, size_t max_hosts) {
+    if (prefix < 0 || prefix > 128)
+        throw std::runtime_error("bad IPv6 prefix in '" + raw + "'");
+    int host_bits = 128 - prefix;
+    if (host_bits >= 64)
+        throw std::runtime_error(
+            "IPv6 prefix /" + std::to_string(prefix) + " in '" + raw +
+            "' spans more than 2^64 hosts; use a /64 or larger prefix");
+    uint64_t count = 1ull << host_bits;
+    if (out.size() + count > max_hosts)
+        throw std::runtime_error("target expansion exceeds " +
+                                 std::to_string(max_hosts) + " hosts");
+
+    auto base = asio::ip::make_address_v6(addr).to_bytes();
+    for (int bit = 0; bit < host_bits; ++bit)
+        base[15 - bit / 8] &= static_cast<unsigned char>(~(1 << (bit % 8)));
+
+    for (uint64_t i = 0; i < count; ++i) {
+        auto b = base;
+        for (int bit = 0; bit < host_bits; ++bit)
+            if ((i >> bit) & 1)
+                b[15 - bit / 8] |= static_cast<unsigned char>(1 << (bit % 8));
+        out.insert(asio::ip::address_v6(b).to_string());
+    }
 }
 
 } // namespace
@@ -64,9 +85,6 @@ std::vector<std::string> expand_targets(const std::vector<std::string>& specs,
         // strip optional scheme and path
         size_t scheme = spec.find("://");
         if (scheme != std::string::npos) spec = spec.substr(scheme + 3);
-        size_t slash_path = spec.find('/');
-        std::string host_part =
-            (slash_path == std::string::npos) ? spec : spec.substr(0, slash_path);
 
         std::smatch m;
         if (std::regex_match(spec, m, cidr_re)) {
@@ -87,16 +105,53 @@ std::vector<std::string> expand_targets(const std::vector<std::string>& specs,
                                          std::to_string(max_hosts) + " hosts");
             for (uint64_t i = 0; i < count; ++i)
                 out.insert(u32_to_ip(network + static_cast<uint32_t>(i)));
-        } else if (is_ipv4_literal(host_part)) {
-            out.insert(host_part);
-        } else if (!host_part.empty()) {
+            continue;
+        }
+
+        // Bare IPv6 CIDR ("2001:db8::/64", "::1/128"): a '/' followed by an
+        // all-digits tail after an address that parses as IPv6. Anything
+        // else after the slash (URL path) is dropped below.
+        size_t slash = spec.find('/');
+        if (slash != std::string::npos) {
+            std::string head = spec.substr(0, slash);
+            std::string tail = spec.substr(slash + 1);
+            bool tail_digits = !tail.empty() &&
+                tail.find_first_not_of("0123456789") == std::string::npos;
+            bool head_is_v6 = false;
+            try {
+                asio::ip::make_address_v6(head);
+                head_is_v6 = true;
+            } catch (const std::exception&) {
+            }
+            if (head_is_v6 && tail_digits) {
+                expand_v6_cidr(out, head, std::stoi(tail), raw, max_hosts);
+                continue;
+            }
+            spec = head;
+        }
+
+        // [2001:db8::1] -> 2001:db8::1
+        if (spec.size() >= 2 && spec.front() == '[' && spec.back() == ']')
+            spec = spec.substr(1, spec.size() - 2);
+
+        if (spec.empty())
+            throw std::runtime_error("empty target in '" + raw + "'");
+
+        bool literal = false;
+        try {
+            asio::ip::make_address(spec); // IPv4 or IPv6 literal
+            literal = true;
+        } catch (const std::exception&) {
+        }
+
+        if (literal) {
+            out.insert(spec);
+        } else {
             // Validate resolvability early (fail fast), but keep the hostname:
             // TLS SNI, HTTP Host headers and readable reports all need the
             // original name, not the resolved address.
-            resolve_host(host_part);
-            out.insert(host_part);
-        } else {
-            throw std::runtime_error("empty target in '" + raw + "'");
+            resolve_host(spec);
+            out.insert(spec);
         }
     }
     return {out.begin(), out.end()};

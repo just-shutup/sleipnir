@@ -49,4 +49,37 @@ private:
     asio::ip::tcp::socket socket_;
 };
 
+// Outcome of a UDP recv: a datagram, a refusal (ICMP port unreachable
+// delivered to the connected socket — means the port is closed), or an
+// empty timeout (port behaves as open|filtered).
+struct UdpRecv {
+    std::string data;
+    bool refused = false;
+};
+
+// Same blocking-style pattern as TcpClient, over UDP. connect() sets the
+// default destination (so ICMP errors surface on recv); works with IPv4 and
+// IPv6 endpoints alike.
+class UdpClient {
+public:
+    explicit UdpClient(asio::io_context& io);
+
+    // Resolve + "connect" the UDP socket. Returns false on resolution
+    // failure or timeout.
+    bool connect(const std::string& host, uint16_t port, int timeout_ms);
+
+    bool send(std::string_view data);
+
+    // Waits up to wait_ms for one datagram.
+    UdpRecv recv(int wait_ms, size_t max_bytes = 65536);
+
+    void close();
+
+private:
+    void run_round();
+
+    asio::io_context& io_;
+    asio::ip::udp::socket socket_;
+};
+
 } // namespace sln

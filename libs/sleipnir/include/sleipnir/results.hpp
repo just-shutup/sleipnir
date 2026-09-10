@@ -15,6 +15,8 @@ struct ScanStats {
     size_t jobs_total = 0;
     std::atomic<uint64_t> jobs_done{0};
     std::atomic<uint64_t> open_ports{0};
+    std::atomic<uint64_t> closed_ports{0};
+    std::atomic<uint64_t> filtered_ports{0};
     std::atomic<uint64_t> findings{0};
 
     uint64_t jobs_done_snapshot() const { return jobs_done.load(); }
@@ -24,6 +26,11 @@ class ResultCollector {
 public:
     void add_port(PortResult r);
     void add_finding(Finding f);
+
+    // Account a job outcome without keeping a report row — keeps JSON and
+    // console reports small when a SYN/UDP pass marks hundreds of ports
+    // closed or filtered.
+    void count_port(PortStatus s);
 
     // Copy snapshots (safe to read after workers joined; also callable live).
     std::vector<PortResult> ports() const;

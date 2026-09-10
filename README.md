@@ -93,7 +93,8 @@ Sleipnir — инструмент аудита, разработанный в у
 
 <table>
 <tr><th>Модуль</th><th>Что делает</th></tr>
-<tr><td><b>Разведка</b></td><td>IP-литералы, CIDR (<code>10.0.0.0/24</code>), DNS-имена, URL-ввод; порты <code>top100</code>, списки и диапазоны; пул из 32 воркеров, все операции с таймаутами</td></tr>
+<tr><td><b>Разведка</b></td><td>IPv4/IPv6-литералы (в т.ч. <code>[v6]</code> в скобках и URL-ввод), CIDR обоих семейств (<code>10.0.0.0/24</code>, <code>2001:db8::/64</code>), DNS-имена (A/AAAA); порты <code>top100</code>, списки и диапазоны; пул воркеров, все операции с таймаутами</td></tr>
+<tr><td><b>Скан портов</b></td><td>TCP connect-скан по умолчанию; <code>--syn</code> — half-open скан на raw-сокетах (Linux, root/CAP_NET_RAW, с автоматическим fallback на connect); <code>--udp</code> — UDP-скан с probe-нагрузками для 13 сервисов (DNS, NTP, SNMP, TFTP, SSDP, mDNS, memcached…), статусы open/closed/filtered во всех отчётах; nmap-профили темпа <code>-T0…-T5</code> с адаптивным backoff'ом</td></tr>
 <tr><td><b>Fingerprinting</b></td><td>Декларативная таблица проб в духе nmap: NULL-проба + активные пробы (HTTP, Redis, PostgreSQL, MongoDB, IRC) и бинарные протоколы (MySQL, VNC, telnet); 12+ типов сервисов, извлечение продукта и версии</td></tr>
 <tr><td><b>CVE-матчинг</b></td><td>Локальная база: <b>31 продукт, 95 записей</b> (OpenSSH, vsftpd, Apache, nginx, OpenSSL, MySQL, PostgreSQL, Redis, Tomcat, PHP, WordPress, Jenkins, Grafana, Elasticsearch, CouchDB, Webmin, Exchange…), constraint-язык версий (<code>&lt;9.8p1</code>, <code>&gt;=1.0 &lt;2.0</code>); стек технологий собирается из <code>Server</code> и <code>X-Powered-By</code></td></tr>
 <tr><td><b>TLS-аудит</b></td><td>Хэндшейк на TLS-портах с SNI; сертификат: срок (+окно 14 дней), самоподписанность, доверие цепочке, соответствие имени; активный детект TLS 1.0/1.1/SSL 3.0</td></tr>
@@ -120,11 +121,18 @@ sleipnir [OPTIONS] [SUBCOMMAND]
 sleipnir scan <targets...> [OPTIONS]
   -p, --ports SPEC       Порты: 'top100', список или диапазоны (по умолчанию top100)
   -t, --threads N        Число воркеров (по умолчанию 32)
+  -T, --timing 0..5      Профиль темпа (0=paranoid … 5=insane, 3=normal):
+                         задержки, таймауты, лимит воркеров, адаптивный backoff
       --timeout MS       Таймаут операции, мс (по умолчанию 2500)
       --no-plugins       Отключить Lua-движок
       --data DIR         Каталог данных: probes, CVE db (по умолчанию 'data')
   --no-tls               Отключить TLS-аудит
   --tls-ports SPEC       Порты для TLS-хэндшейка (по умолчанию 443,465,636,993,995,8443,…)
+      --syn              SYN (half-open) скан портов на raw-сокетах
+                         (Linux, нужен root/CAP_NET_RAW; иначе fallback на connect)
+      --udp              UDP-скан сервисов (probe-нагрузки DNS/NTP/SNMP/SSDP/…)
+      --udp-ports SPEC   Порты для --udp (по умолчанию 53,69,123,137,161,162,
+                         500,514,4500,1900,5353,11211)
   --safe                 Неинвазивный режим (переопределяет -f)
   --delay MS             Пауза между заданиями на воркере
   --user-agent STR       HTTP User-Agent
@@ -146,12 +154,20 @@ sleipnir scan <targets...> [OPTIONS]
 # Подсеть, HTML-отчёт для отчётности
 sleipnir scan 192.168.1.0/24 -p 22,80,443,3306 --report report.html
 
+# IPv6: литералы, скобки и CIDR работают одинаково
+sleipnir scan '[2001:db8::1]' ::1 2001:db8::aa10/126 -p 22,80
+
+# SYN-скан (root) + UDP-скан сервисов; SNMP/DNS/mDNS отвечают сами
+sudo sleipnir scan 10.0.0.7 --syn --udp --udp-ports 53,161,5353
+
 # TLS-аудит веб-сервера по имени (SNI, проверка сертификата)
 sleipnir scan intranet.example.test -p 443,8443
 
 # CI/CD: сборка падает при находках уровня medium и выше
 sleipnir scan 127.0.0.1 -p 80,443 --fail-on medium
 ```
+
+Статусы портов (в консоли, JSON и HTML): **open** — получен ответ или установленное соединение; **closed** — активный отказ (TCP RST / ICMP port unreachable); **filtered** — нет ответа до таймаута. Для UDP «тишина» означает `open|filtered` (классика UDP-сканирования: закрытый порт отвечает ICMP-ошибкой, открытый может молчать).
 
 Скан прерывается `Ctrl+C` с печатью частичных результатов; в оболочке скан можно перезапустить сразу.
 
@@ -174,8 +190,11 @@ sleipnir scan 127.0.0.1 -p 80,443 --fail-on medium
 ```
 apps/sleipnir/main.cpp        CLI (CLI11), REPL, сигналы, авто-поиск data/plugins
 libs/sleipnir/
-  src/targets.cpp             Расширение таргетов и портов, DNS-резолв
-  src/netio.cpp               TcpClient: async-Asio под блокирующим API, таймауты
+  src/targets.cpp             Расширение таргетов (IPv4/IPv6, CIDR, скобки) и портов, DNS-резолв
+  src/netio.cpp               TcpClient/UdpClient: async-Asio под блокирующим API, таймауты
+  src/syn_scan.cpp            SYN (half-open) скан на raw-сокетах: свои IP/TCP-пакеты,
+                              приём ответов, классификация open/closed/filtered
+  src/udp_scan.cpp            UDP-скан: probe-нагрузки по портам, классификация ответов
   src/tls_client.cpp          TlsClient: asio::ssl + извлечение сертификата (OpenSSL)
   src/tls_checks.cpp          Аудит сертификата и legacy-протоколов TLS
   src/probes.cpp              ProbeDb: таблица проб + regex-fingerprinting
@@ -194,7 +213,7 @@ tests/                        Юнит-тесты (doctest)
 .github/workflows/release.yml  Сборка и публикация релиза
 ```
 
-Пайплайн одного job'а: **connect → probes (fingerprint) → CVE matching → TLS-аудит (TLS-порты) → `on_port_open` → HTTP-проверки + `on_http_response` → `on_service` → robustness (opt-in)**.
+Пайплайн запуска: **[SYN-скан (--syn), иначе connect-фаза] → UDP-скан (--udp, параллельно независимая фаза) → на открытых TCP-портах: probes (fingerprint) → CVE matching → TLS-аудит (TLS-порты) → `on_port_open` → HTTP-проверки + `on_http_response` → `on_service` → robustness (opt-in)**. Закрытые и фильтрованные порты после SYN/UDP-фаз учитываются в статистике и отчётах со своим статусом, не порождая лишних находок.
 
 Каждый воркер владеет своим `io_context` и транспортами; разрыв соединения во время проб (peer EOF) детектируется и вызывает переподключение — fingerprinting устойчив к сервисам, отвечающим фатальной ошибкой и закрывающим соединение. `ScanEngine::request_stop()` атомарно останавливает воркеры и модуль устойчивости; флаг сбрасывается перед каждым запуском.
 
@@ -234,8 +253,8 @@ end
 ```json
 {
   "meta":     { "tool": "sleipnir", "version": "...", "elapsed_seconds": ..., "config": {...} },
-  "stats":    { "hosts": ..., "open_ports": ..., "findings": ... },
-  "targets":  [ { "host", "port", "service", "product", "version", "banner", "http", "tls" } ],
+  "stats":    { "hosts": ..., "open_ports": ..., "closed_ports": ..., "filtered_ports": ..., "findings": ... },
+  "targets":  [ { "host", "port", "status": "open|closed|filtered", "service", "product", "version", "banner", "http", "tls" } ],
   "findings": [ { "host", "port", "severity", "title", "cve", "source", "description", "evidence" } ]
 }
 ```
@@ -246,11 +265,18 @@ HTML-отчёт — самодостаточный документ с inline-CS
 
 ## Мок-лаборатория
 
-Тринадцать слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации:
+Тринадцать TCP-слушателей на `127.0.0.1` (stdlib Python + системный `openssl`), воспроизводящих типовые уязвимые конфигурации, плюс UDP-сервисы (SSDP, mDNS, memcached) и тот же SSH/HTTP-пары на `[::1]` для IPv6-прогонов:
 
 ```bash
 python3 tools/mocklab/mock_services.py
 sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,8443 -f --report report.html
+
+# UDP-скан: SSDP и mDNS отвечают, memcached отдаёт VERSION по UDP-фрейму,
+# закрытый SNMP показывает статус closed (ICMP port unreachable)
+sleipnir scan 127.0.0.1 -p 8080 --udp --udp-ports 1900,5353,11211,161
+
+# IPv6: SSH/HTTP слушают и на [::1]
+sleipnir scan ::1 -p 2201,8080
 ```
 
 | Порт | Сервис | Что эмулирует | Ожидаемый результат |
@@ -269,6 +295,8 @@ sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,844
 | 8083 | VulnWeb | отражённый XSS в /search, POST /login без CSRF, traversal в /profile?page, открытый редирект | краулер: XSS + traversal (high), redirect (medium), CSRF (low) |
 | 8443 | HTTPS | то же поверх TLS, самоподписанный сертификат (CN=mock.lab, 1 день) | CVE + TLS-находки |
 
+UDP-сервисы (флаг `--udp`): `1900/udp` SSDP (отвечает на M-SEARCH), `5353/udp` mDNS (PTR-ответ с флагом QR), `11211/udp` memcached (UDP-фрейм + `VERSION`). Порты >1024, чтобы лаба работала без root.
+
 ---
 
 ## Sleipnir рядом с классикой
@@ -277,7 +305,7 @@ sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,844
 
 | | **nmap** | **Sleipnir** |
 |---|---|---|
-| Скан портов | SYN/UDP/ACK-сканы, тысячи хостов в секунды | TCP connect-скан, пул воркеров — медленнее, но без raw-сокетов и привилегий root |
+| Скан портов | SYN/UDP/ACK-сканы, тысячи хостов в секунды | connect-скан без привилегий, SYN-скан на raw-сокетах (`--syn`, Linux+root) и UDP с probe-нагрузками (`--udp`) — медленнее nmap, но те же три статуса |
 | Fingerprinting | ~1200 проб, детект ОС | 7 проб, 12+ сервисов — расширяемы декларативно, в JSON |
 | Скриптование | NSE (~600 скриптов) | Lua-плагины с TLS-инспекцией в API |
 | Отчёты | XML/grepable | JSON + самодостаточный HTML |
@@ -300,8 +328,8 @@ sleipnir scan 127.0.0.1 -p 2101,2102,2201,2375,2501,2502,2503,6380,8080,8081,844
 - **Новые CVE** — записи в `data/cve_map.json`: ключ — алиас баннера, `aliases` — написания, `vulns` — `{cve, affected, cvss, summary}`.
 - **Новые проверки** — Lua-плагин; то, что должно быть быстрым и компилируемым, — в `checks.hpp`.
 
-Известные рамки: сигнатурный детект (версию, скрытую в баннере, не матчит), без аутентификации в приложениях, TCP only, SMB/RPC не пробируются. Дорожная карта: master/worker-раздача целей по сети, TLS-аудит всех портов, экспорт SARIF, diff между запусками.
+Известные рамки: сигнатурный детект (версию, скрытую в баннере, не матчит), без аутентификации в приложениях, UDP-скан ведёт себя как `open|filtered` на молчащих портах (без активных RPC-проб), SYN-скан требует Linux и root/CAP_NET_RAW (иначе автоматический fallback на connect), SMB/RPC не пробируются. Дорожная карта: master/worker-раздача целей по сети, TLS-аудит всех портов, экспорт SARIF, diff между запусками.
 
 ## Проект
 
-Sleipnir v0.6.0 — это самостоятельный проект по информационной безопасности: асинхронный сетевой движок на Asio, интеграция Lua (sol2), декларативные базы знаний с языком ограничений версий, TLS-инспекция на OpenSSL и методика самотестирования на воспроизводимом полигоне с негативными тестами.
+Sleipnir v0.7.0 — это самостоятельный проект по информационной безопасности: асинхронный сетевой движок на Asio, интеграция Lua (sol2), декларативные базы знаний с языком ограничений версий, TLS-инспекция на OpenSSL, TCP/SYN/UDP-сканирование с полной поддержкой IPv6 и методика самотестирования на воспроизводимом полигоне с негативными тестами.

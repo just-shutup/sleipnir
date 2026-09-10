@@ -2,7 +2,9 @@
 #include "sleipnir/crawler.hpp"
 #include "sleipnir/fuzz.hpp"
 #include "sleipnir/netio.hpp"
+#include "sleipnir/syn_scan.hpp"
 #include "sleipnir/targets.hpp"
+#include "sleipnir/udp_scan.hpp"
 
 #include <asio.hpp>
 
@@ -53,6 +55,9 @@ ScanEngine::ScanEngine(const ScanConfig& cfg)
       probes_(ProbeDb::load(cfg.data_dir + "/service_probes.json")),
       cves_(CveDb::load(cfg.data_dir + "/cve_map.json")) {
     collector_.set_verbose(cfg.verbose);
+    TimingProfile prof = timing_profile(cfg.timing);
+    base_delay_ms_ = std::max(prof.delay_ms, cfg.delay_ms);
+    adaptive_ceiling_ = prof.adaptive_ceiling;
     if (!cfg.disable_plugins) {
         for (const auto& rep : plugins_.load_dir(cfg.plugins_dir)) {
             if (rep.error.empty()) {
@@ -74,21 +79,44 @@ void ScanEngine::worker_loop() {
 
     while (auto job = queue_.pop()) {
         if (stop_requested_) break;
-        process_job(*job, client, io);
-        if (cfg_.delay_ms > 0)
-            std::this_thread::sleep_for(
-                std::chrono::milliseconds(cfg_.delay_ms));
+        int failed_ms = process_job(*job, client, io);
+        // Adaptive pacing: a connect that burned the whole timeout means a
+        // filtered/ratelimiting target — back off. Fast RSTs and successful
+        // connects recover toward the profile floor.
+        if (failed_ms >= cfg_.timeout_ms * 9 / 10) {
+            int d = adaptive_delay_ms_.load();
+            int nd = std::min(d ? d * 2 : 40, adaptive_ceiling_);
+            if (nd != d) {
+                adaptive_delay_ms_.store(nd);
+                if (cfg_.verbose)
+                    collector_.log("[timing] backoff -> " +
+                                   std::to_string(nd) + " ms");
+            }
+        } else {
+            int d = adaptive_delay_ms_.load();
+            int nd = std::max(d / 2, 0);
+            if (nd != d) adaptive_delay_ms_.store(nd);
+        }
+        int pause = std::max(base_delay_ms_, adaptive_delay_ms_.load());
+        if (pause > 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(pause));
     }
 }
 
-void ScanEngine::process_job(const Job& job, TcpClient& client,
-                             asio::io_context& io) {
+int ScanEngine::process_job(const Job& job, TcpClient& client,
+                            asio::io_context& io) {
     const int timeout = cfg_.timeout_ms;
 
-    if (!client.connect(job.host, job.port, timeout)) {
+    auto t0 = std::chrono::steady_clock::now();
+    bool connected = client.connect(job.host, job.port, timeout);
+    int connect_ms = static_cast<int>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - t0)
+            .count());
+    if (!connected) {
         if (cfg_.verbose) collector_.debug(job.host + ":" +
                                            std::to_string(job.port) + " closed");
-        return;
+        return connect_ms;
     }
 
     PortResult result;
@@ -210,7 +238,7 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
             }
             plugins_.on_service(ctx, io, timeout, collector_);
             collector_.add_port(std::move(result));
-            return;
+            return 0;
         }
         // not TLS after all: keep the "unknown" result from below
     }
@@ -285,16 +313,76 @@ void ScanEngine::process_job(const Job& job, TcpClient& client,
     }
 
     collector_.add_port(std::move(result));
+    return 0;
 }
 
 std::vector<PortResult> ScanEngine::run(const std::vector<std::string>& hosts,
                                         const std::vector<uint16_t>& ports) {
     auto& stats = collector_.stats();
     stats.hosts = hosts.size();
-    stats.jobs_total = hosts.size() * ports.size();
+    stats.jobs_total = 0;
 
-    for (const auto& host : hosts)
-        for (uint16_t port : ports) queue_.push({host, port});
+    // Phase 1: SYN (stealth) discovery. When it runs, it replaces the
+    // connect-based port state: open ports continue through the full
+    // fingerprinting pipeline, closed/filtered ones are only counted.
+    std::vector<Job> tcp_jobs;
+    bool syn_used = false;
+    if (cfg_.syn_scan) {
+        auto outcomes = syn_discover(hosts, ports, cfg_.timeout_ms,
+                                     cfg_.delay_ms, collector_);
+        if (outcomes) {
+            syn_used = true;
+            size_t open_count = 0;
+            stats.jobs_total += outcomes->size();
+            for (const auto& o : *outcomes) {
+                if (o.status == PortStatus::Open) {
+                    tcp_jobs.push_back({o.host, o.port});
+                    ++open_count;
+                } else if (cfg_.verbose) {
+                    PortResult row;
+                    row.host = o.host;
+                    row.port = o.port;
+                    row.status = o.status;
+                    row.service = "unknown";
+                    collector_.add_port(std::move(row));
+                } else {
+                    collector_.count_port(o.status);
+                }
+            }
+            stats.jobs_total += open_count;
+            collector_.log("  [syn] " + std::to_string(outcomes->size()) +
+                           " endpoint(s) probed: " +
+                           std::to_string(open_count) + " open, " +
+                           std::to_string(outcomes->size() - open_count) +
+                           " closed/filtered");
+        } else {
+            collector_.log(
+                "[syn] raw sockets unavailable (need root / CAP_NET_RAW) — "
+                "falling back to TCP connect scan");
+        }
+    }
+    if (!syn_used) {
+        for (const auto& host : hosts)
+            for (uint16_t port : ports) tcp_jobs.push_back({host, port});
+        stats.jobs_total += tcp_jobs.size();
+    }
+
+    // Phase 2: UDP service scan — independent of the TCP pipeline.
+    if (cfg_.udp_scan) {
+        auto udp_ports = expand_ports(cfg_.udp_ports);
+        stats.jobs_total += hosts.size() * udp_ports.size();
+        auto rows = udp_discover(hosts, udp_ports, cfg_.timeout_ms,
+                                 cfg_.threads, collector_);
+        for (auto& r : rows) {
+            if (r.status == PortStatus::Open || cfg_.verbose)
+                collector_.add_port(std::move(r));
+            else
+                collector_.count_port(r.status);
+        }
+    }
+
+    // Phase 3: TCP fingerprinting pipeline.
+    for (const auto& job : tcp_jobs) queue_.push(job);
     queue_.close();
 
     asio::thread_pool pool(cfg_.threads);

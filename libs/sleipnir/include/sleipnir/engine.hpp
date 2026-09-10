@@ -53,7 +53,9 @@ private:
     };
 
     void worker_loop();
-    void process_job(const Job& job, TcpClient& client, asio::io_context& io);
+    // Returns the failed-connect duration in ms, or 0 when the port is open
+    // (the adaptive pacer distinguishes filtered timeouts from fast RSTs).
+    int process_job(const Job& job, TcpClient& client, asio::io_context& io);
 
     ScanConfig cfg_;
     ProbeDb probes_;
@@ -63,6 +65,9 @@ private:
     JobQueue<Job> queue_;
     std::set<uint16_t> tls_ports_;
     std::atomic<uint64_t> active_workers_{0};
+    std::atomic<int> adaptive_delay_ms_{0}; // runtime backoff, ms
+    int base_delay_ms_ = 0;                 // timing profile delay
+    int adaptive_ceiling_ = 500;
 
     static inline std::atomic<bool> stop_requested_{false};
 };
