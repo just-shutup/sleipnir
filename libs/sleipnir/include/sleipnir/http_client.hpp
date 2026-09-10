@@ -89,7 +89,13 @@ inline std::optional<HttpResponse> parse_response(std::string raw) {    if (raw.
         while (!value.empty() &&
                (value.back() == '\r' || value.back() == ' ' || value.back() == '\t'))
             value.pop_back();
-        resp.headers[key] = value;
+        // Multiple Set-Cookie headers are joined with \n: the map keeps one
+        // value per key, but the auth session needs every cookie of the
+        // login response. Other duplicate keys keep the last value.
+        if (key == "set-cookie" && resp.headers.count(key))
+            resp.headers[key] += "\n" + value;
+        else
+            resp.headers[key] = value;
     }
 
     if (header_end != std::string::npos) {

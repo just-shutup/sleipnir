@@ -1,4 +1,5 @@
 #include "sleipnir/engine.hpp"
+#include "sleipnir/auth.hpp"
 #include "sleipnir/crawler.hpp"
 #include "sleipnir/fuzz.hpp"
 #include "sleipnir/netio.hpp"
@@ -273,6 +274,18 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
     plugins_.on_port_open(ctx, io, timeout, collector_);
 
+    // Authenticated scanning (--auth): headers established once per port,
+    // then attached to every request of the HTTP pipelines below.
+    std::vector<std::pair<std::string, std::string>> session_headers;
+    if (auth_applies(cfg_.auth, job.host)) {
+        session_headers = establish_auth_session(io, cfg_.auth, job.host,
+                                                 timeout, cfg_.user_agent,
+                                                 collector_);
+        if (!session_headers.empty())
+            collector_.log("  [auth] session active (" + cfg_.auth.method +
+                           ")");
+    }
+
 #ifdef SLEIPNIR_HAVE_TLS
     // 3a. TLS endpoint: plaintext probes could not identify the service and
     // the port is a known TLS candidate -> handshake, certificate checks,
@@ -292,9 +305,11 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                                                       timeout))
                 collector_.add_finding(std::move(f));
 
+            // session headers ride on every HTTP request over TLS
+            AuthStream<TlsClient> http(tls, session_headers);
             bool http_ok = false;
             if (auto resp =
-                    http_get(tls, job.host, job.port, "/", timeout,
+                    http_get(http, job.host, job.port, "/", timeout,
                              cfg_.user_agent)) {
                 http_ok = true;
                 result.http_status = resp->status;
@@ -308,19 +323,19 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                         pending_cve.push_back(std::move(f));
                 }
 
-                for (auto& f : check_sensitive_paths(tls, job.host, job.port,
+                for (auto& f : check_sensitive_paths(http, job.host, job.port,
                                                      timeout, cfg_.user_agent))
                     collector_.add_finding(std::move(f));
-                for (auto& f : check_webapp_probes(tls, job.host, job.port,
+                for (auto& f : check_webapp_probes(http, job.host, job.port,
                                                    timeout, cfg_.user_agent,
                                                    !cfg_.safe))
                     collector_.add_finding(std::move(f));
-                for (auto& f : check_http_methods(tls, job.host, job.port,
+                for (auto& f : check_http_methods(http, job.host, job.port,
                                                   timeout, cfg_.user_agent))
                     collector_.add_finding(std::move(f));
 
                 if (!cfg_.no_crawl)
-                    crawl_and_assess(tls, job.host, job.port, cfg_, timeout,
+                    crawl_and_assess(http, job.host, job.port, cfg_, timeout,
                                      "https", collector_);
 
                 ctx.service = "https";
@@ -334,7 +349,7 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
              // Active CVE verification over the TLS transport.
              if (http_ok)
-                 verification_stage(tls, cfg_, job.host, job.port, timeout,
+                 verification_stage(http, cfg_, job.host, job.port, timeout,
                                     pending_cve, collector_, io, plugins_,
                                     checks_dir_);
              else
@@ -353,7 +368,9 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
     bool http_ok = false;
     if (result.service == "http") {
         client.close();
-        if (auto resp = http_get(client, job.host, job.port, "/", timeout,
+        // session headers ride on every HTTP request
+        AuthStream<TcpClient> http(client, session_headers);
+        if (auto resp = http_get(http, job.host, job.port, "/", timeout,
                                  cfg_.user_agent)) {
             http_ok = true;
             result.http_status = resp->status;
@@ -368,20 +385,20 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
             }
 
             for (auto& f :
-                 check_sensitive_paths(client, job.host, job.port, timeout,
+                 check_sensitive_paths(http, job.host, job.port, timeout,
                                        cfg_.user_agent))
                 collector_.add_finding(std::move(f));
             for (auto& f :
-                 check_webapp_probes(client, job.host, job.port, timeout,
+                 check_webapp_probes(http, job.host, job.port, timeout,
                                      cfg_.user_agent, !cfg_.safe))
                 collector_.add_finding(std::move(f));
             for (auto& f :
-                 check_http_methods(client, job.host, job.port, timeout,
+                 check_http_methods(http, job.host, job.port, timeout,
                                     cfg_.user_agent))
                 collector_.add_finding(std::move(f));
 
             if (!cfg_.no_crawl)
-                crawl_and_assess(client, job.host, job.port, cfg_, timeout,
+                crawl_and_assess(http, job.host, job.port, cfg_, timeout,
                                  "http", collector_);
 
             ctx.has_http = true;
@@ -415,10 +432,11 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
     // Active CVE verification: over HTTP the buffered findings can be proven
     // by their checks; without HTTP only script-based checks can still run.
-    if (http_ok)
-        verification_stage(client, cfg_, job.host, job.port, timeout,
+    if (http_ok) {
+        AuthStream<TcpClient> http(client, session_headers);
+        verification_stage(http, cfg_, job.host, job.port, timeout,
                            pending_cve, collector_, io, plugins_, checks_dir_);
-    else
+    } else
         verify_scripts_and_flush(pending_cve, collector_, io, plugins_,
                                  checks_dir_, job.host, job.port, timeout,
                                  cfg_.safe);

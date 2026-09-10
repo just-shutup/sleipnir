@@ -52,6 +52,13 @@ struct CrawlConfig {
     std::string scheme = "http";
     std::string host;
     uint16_t port = 80;
+    // /robots.txt Disallow/Sitemap entries seed the crawl queue: what the
+    // site itself tries to hide from crawlers is exactly what an audit
+    // should look at.
+    bool seed_robots = true;
+    // Budget for linked .js files parsed for endpoint references
+    // (fetch/axios/XMLHttpRequest calls).
+    int max_js = 10;
 };
 
 struct CrawlForm {

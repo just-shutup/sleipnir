@@ -2,6 +2,7 @@
 #include <doctest/doctest.h>
 
 #include "sleipnir/checks.hpp"
+#include "sleipnir/auth.hpp"
 #include "sleipnir/crawler.hpp"
 #include "sleipnir/http_client.hpp"
 #include "sleipnir/cve_db.hpp"
@@ -1329,4 +1330,273 @@ TEST_CASE("phpunit eval-stdin probe confirms and gates on safe mode") {
     for (const auto& f : out3)
         CHECK(f.title != "PHPUnit eval-stdin.php exposed (CVE-2017-9841)");
     CHECK(s3.request_sent.find("eval-stdin") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// Authenticated scanning (--auth)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("auth scope and base64") {
+    AuthConfig a;
+    a.method = "basic";
+    CHECK(a.enabled());
+
+    // empty scope -> applies everywhere
+    CHECK(auth_applies(a, "anything.example"));
+    // explicit scope
+    a.hosts = {"www.target.test", "api.target.test"};
+    CHECK(auth_applies(a, "www.target.test"));
+    CHECK(auth_applies(a, "API.TARGET.TEST")); // case-insensitive
+    CHECK_FALSE(auth_applies(a, "other.example"));
+    // wildcard
+    a.hosts = {"*"};
+    CHECK(auth_applies(a, "anything"));
+    // disabled -> never
+    a.method = "";
+    CHECK_FALSE(auth_applies(a, "anything"));
+
+    // RFC 4648 test vectors
+    CHECK(base64_encode("") == "");
+    CHECK(base64_encode("f") == "Zg==");
+    CHECK(base64_encode("fo") == "Zm8=");
+    CHECK(base64_encode("foo") == "Zm9v");
+    CHECK(base64_encode("foob") == "Zm9vYg==");
+    CHECK(base64_encode("fooba") == "Zm9vYmE=");
+    CHECK(base64_encode("foobar") == "Zm9vYmFy");
+}
+
+TEST_CASE("auth url parsing") {
+    auto t = parse_auth_url("http://127.0.0.1:8096/login");
+    REQUIRE(t);
+    CHECK(t->scheme == "http");
+    CHECK(t->host == "127.0.0.1");
+    CHECK(t->port == 8096);
+    CHECK(t->path == "/login");
+
+    auto t2 = parse_auth_url("https://www.example.test/auth/signin");
+    REQUIRE(t2);
+    CHECK(t2->scheme == "https");
+    CHECK(t2->port == 443);
+    CHECK(t2->path == "/auth/signin");
+
+    // no path -> "/"
+    auto t3 = parse_auth_url("https://example.test");
+    REQUIRE(t3);
+    CHECK(t3->path == "/");
+
+    // v6 literal with port
+    auto t4 = parse_auth_url("http://[::1]:8080/x");
+    REQUIRE(t4);
+    CHECK(t4->host == "::1");
+    CHECK(t4->port == 8080);
+
+    CHECK_FALSE(parse_auth_url("example.test/login"));  // no scheme
+    CHECK_FALSE(parse_auth_url("ftp://example.test/")); // wrong scheme
+    CHECK_FALSE(parse_auth_url("http:///path"));        // no host
+}
+
+TEST_CASE("establish_auth_session builds static headers") {
+    asio::io_context io;
+    ResultCollector out;
+
+    // basic: no network, straight to the header
+    AuthConfig basic;
+    basic.method = "basic";
+    basic.user = "admin";
+    basic.password = "s3cret";
+    auto h = establish_auth_session(io, basic, "h", 100, "ua", out);
+    REQUIRE(h.size() == 1);
+    CHECK(h[0].first == "Authorization");
+    CHECK(h[0].second == "Basic " + base64_encode("admin:s3cret"));
+
+    // cookie literal
+    AuthConfig cookie;
+    cookie.method = "cookie";
+    cookie.cookie = "sid=abc; theme=dark";
+    auto h2 = establish_auth_session(io, cookie, "h", 100, "ua", out);
+    REQUIRE(h2.size() == 1);
+    CHECK(h2[0].first == "Cookie");
+    CHECK(h2[0].second == "sid=abc; theme=dark");
+
+    // Netscape cookie jar file
+    const char* jar = "/tmp/sleipnir_test_jar.txt";
+    {
+        std::ofstream f(jar);
+        f << "# Netscape HTTP Cookie File\n"
+          << "#HttpOnly_127.0.0.1\tFALSE\t/\tTRUE\t0\tslnsession\tauthok42\n"
+          << "127.0.0.1\tFALSE\t/\tFALSE\t0\ttheme\tlight\n"
+          << "# comment line\n";
+    }
+    AuthConfig jar_auth;
+    jar_auth.method = "cookie";
+    jar_auth.cookie_file = jar;
+    auto h3 = establish_auth_session(io, jar_auth, "h", 100, "ua", out);
+    REQUIRE(h3.size() == 1);
+    CHECK(h3[0].second.find("slnsession=authok42") != std::string::npos);
+    CHECK(h3[0].second.find("theme=light") != std::string::npos);
+    std::remove(jar);
+
+    // empty cookie config -> nothing, logged as failure
+    AuthConfig empty;
+    empty.method = "cookie";
+    CHECK(establish_auth_session(io, empty, "h", 100, "ua", out).empty());
+}
+
+TEST_CASE("auth stream injects session headers into requests") {
+    FakeStream s;
+    s.response = raw_response(200, "ok");
+    AuthStream<FakeStream> http(s, {{"Cookie", "sid=1"},
+                                    {"Authorization", "Basic abc"}});
+    auto resp = http_get(http, "h", 8080, "/x", 100, "ua");
+    REQUIRE(resp);
+    // request line untouched
+    CHECK(s.request_sent.rfind("GET /x HTTP/1.1\r\n", 0) == 0);
+    // both headers injected as proper lines: the previous line keeps its
+    // CRLF terminator (no gluing onto "Connection: close")
+    CHECK(s.request_sent.find("Cookie: sid=1\r\n") != std::string::npos);
+    CHECK(s.request_sent.find("Authorization: Basic abc\r\n") !=
+          std::string::npos);
+    CHECK(s.request_sent.find("closeCookie:") == std::string::npos);
+    CHECK(s.request_sent.find("close\r\nCookie: sid=1") != std::string::npos);
+    // injected before the body separator, not into the body
+    size_t sep = s.request_sent.find("\r\n\r\n");
+    CHECK(s.request_sent.find("Cookie: sid=1") < sep);
+
+    // bodied requests keep the payload after the separator
+    FakeStream s2;
+    s2.response = raw_response(200, "ok");
+    AuthStream<FakeStream> http2(s2, {{"Cookie", "sid=1"}});
+    HttpOptions opts;
+    opts.body = "a=b";
+    auto r2 = http_request_ex(http2, "POST", "h", 8080, "/login", 100, "ua",
+                              opts);
+    REQUIRE(r2);
+    CHECK(s2.request_sent.find("\r\n\r\na=b") != std::string::npos);
+    size_t c = s2.request_sent.find("Cookie: sid=1\r\n");
+    size_t sep2 = s2.request_sent.find("\r\n\r\n");
+    CHECK(c < sep2);
+    CHECK(s2.request_sent.find("Content-Length: 3") != std::string::npos);
+
+    // empty session headers: request passes through unchanged
+    FakeStream s3;
+    s3.response = raw_response(200, "ok");
+    AuthStream<FakeStream> plain(s3, {});
+    http_get(plain, "h", 80, "/", 100, "ua");
+    CHECK(s3.request_sent.find("\r\n\r\n\r\n") == std::string::npos);
+}
+
+TEST_CASE("multiple set-cookie headers are joined") {
+    // two Set-Cookie lines in one raw response -> joined with \n so the
+    // auth session can collect every cookie
+    std::string raw =
+        "HTTP/1.1 200 OK\r\n"
+        "Set-Cookie: a=1; Path=/; HttpOnly\r\n"
+        "Set-Cookie: b=2; Path=/\r\n"
+        "Content-Length: 2\r\n\r\nok";
+    auto resp = detail::parse_response(raw);
+    REQUIRE(resp);
+    const std::string* sc = resp->header("set-cookie");
+    REQUIRE(sc);
+    CHECK(sc->find("a=1") != std::string::npos);
+    CHECK(sc->find("b=2") != std::string::npos);
+    CHECK(sc->find('\n') != std::string::npos);
+}
+
+TEST_CASE("crawler seeds from robots.txt and sitemap") {
+    std::map<std::string, HttpResponse> pages;
+    auto body = [](std::string b, const char* ct = "text/html") {
+        HttpResponse r;
+        r.status = 200;
+        r.body = std::move(b);
+        r.headers["content-type"] = ct;
+        return r;
+    };
+    pages["/robots.txt"] = body(
+        "User-agent: *\n"
+        "Disallow: /admin\n"
+        "Disallow: /admin/dashboard\n"
+        "Sitemap: http://testhost:8080/sitemap.xml\n",
+        "text/plain");
+    pages["/sitemap.xml"] = body(
+        "<?xml version=\"1.0\"?><urlset>"
+        "<url><loc>http://testhost:8080/public</loc></url>"
+        "</urlset>",
+        "application/xml");
+    pages["/"] = body("<a href='/about'>About</a>");
+    pages["/admin"] = body("<a href='/admin/dashboard'>Dash</a>", "text/html");
+    pages["/admin/dashboard"] = body("dashboard");
+    pages["/public"] = body("public page");
+    pages["/about"] = body("about page");
+
+    HttpFetcher fetch = [&](const std::string& p) -> std::optional<HttpResponse> {
+        auto it = pages.find(p);
+        return it == pages.end() ? std::nullopt : std::optional(it->second);
+    };
+    CrawlConfig cfg;
+    cfg.max_pages = 20;
+    cfg.scheme = "http";
+    cfg.host = "testhost";
+    cfg.port = 8080;
+    auto r = crawl_site(fetch, "/", cfg);
+
+    auto has_page = [&](const std::string& p) {
+        return std::find(r.pages.begin(), r.pages.end(), p) != r.pages.end();
+    };
+    CHECK(has_page("/about"));           // regular links still crawled
+    CHECK(has_page("/admin"));           // robots Disallow entry
+    CHECK(has_page("/admin/dashboard")); // robots Disallow entry
+    CHECK(has_page("/public"));          // sitemap <loc>
+
+    // seed_robots=false skips the seeding
+    CrawlConfig cfg2 = cfg;
+    cfg2.seed_robots = false;
+    auto r2 = crawl_site(fetch, "/", cfg2);
+    auto has2 = [&](const std::string& p) {
+        return std::find(r2.pages.begin(), r2.pages.end(), p) != r2.pages.end();
+    };
+    CHECK_FALSE(has2("/admin"));
+    CHECK_FALSE(has2("/public"));
+    CHECK(has2("/about"));
+}
+
+TEST_CASE("js endpoint extraction feeds the crawl queue") {
+    std::map<std::string, HttpResponse> pages;
+    auto body = [](std::string b, const char* ct = "text/html") {
+        HttpResponse r;
+        r.status = 200;
+        r.body = std::move(b);
+        r.headers["content-type"] = ct;
+        return r;
+    };
+    // the page links a script; the script references API endpoints
+    pages["/"] = body("<html><head>"
+                      "<script src='/static/app.js'></script></head>"
+                      "<body>hello</body></html>");
+    pages["/static/app.js"] = body(
+        "fetch('/api/v1/users');\n"
+        "axios.get('/api/v1/orders');\n"
+        "$.ajax({url: '/api/legacy', method: 'POST'});\n"
+        "var x = 'https://external.example.org/nope';\n",
+        "application/javascript");
+    pages["/api/v1/users"] = body("<html>users</html>");
+    pages["/api/v1/orders"] = body("<html>orders</html>");
+    pages["/api/legacy"] = body("<html>legacy</html>");
+
+    HttpFetcher fetch = [&](const std::string& p) -> std::optional<HttpResponse> {
+        auto it = pages.find(p);
+        return it == pages.end() ? std::nullopt : std::optional(it->second);
+    };
+    CrawlConfig cfg;
+    cfg.max_pages = 20;
+    cfg.scheme = "http";
+    cfg.host = "testhost";
+    cfg.port = 80;
+    auto r = crawl_site(fetch, "/", cfg);
+
+    auto has_page = [&](const std::string& p) {
+        return std::find(r.pages.begin(), r.pages.end(), p) != r.pages.end();
+    };
+    CHECK(has_page("/api/v1/users"));
+    CHECK(has_page("/api/v1/orders"));
+    CHECK(has_page("/api/legacy"));
 }

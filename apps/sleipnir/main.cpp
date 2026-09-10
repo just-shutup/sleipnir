@@ -9,6 +9,7 @@
 #endif
 
 #include <cli11/CLI11.hpp>
+#include <nlohmann/json.hpp>
 
 #include <atomic>
 #include <chrono>
@@ -36,6 +37,51 @@ std::atomic<bool> g_interrupted{false};
 void on_signal(int) {
     g_interrupted = true;
     sln::ScanEngine::request_stop();
+}
+
+// Parses the --auth JSON file into cfg.auth. Returns an error message on
+// invalid configuration, empty on success.
+std::string parse_auth_file(sln::ScanConfig& cfg) {
+    std::ifstream in(cfg.auth_file);
+    if (!in) return "cannot open auth file: " + cfg.auth_file;
+    nlohmann::json j;
+    try {
+        in >> j;
+    } catch (const std::exception& e) {
+        return std::string("auth file is not valid JSON: ") + e.what();
+    }
+
+    auto& a = cfg.auth;
+    a.method = j.value("method", "");
+    for (char& c : a.method)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    a.url = j.value("url", "");
+    a.user = j.value("user", "");
+    a.password = j.value("password", "");
+    a.success = j.value("success", "");
+    a.cookie = j.value("cookie", "");
+    a.cookie_file = j.value("cookie_file", "");
+    if (j.contains("fields") && j["fields"].is_object())
+        for (auto it = j["fields"].begin(); it != j["fields"].end(); ++it)
+            a.fields[it.key()] = it.value().get<std::string>();
+    if (j.contains("hosts") && j["hosts"].is_array())
+        for (const auto& h : j["hosts"])
+            a.hosts.push_back(h.get<std::string>());
+
+    if (a.method == "basic") {
+        if (a.user.empty() || a.password.empty())
+            return "auth method 'basic' needs 'user' and 'password'";
+    } else if (a.method == "form") {
+        if (a.url.empty()) return "auth method 'form' needs 'url'";
+        if (a.fields.empty()) return "auth method 'form' needs 'fields'";
+    } else if (a.method == "cookie") {
+        if (a.cookie.empty() && a.cookie_file.empty())
+            return "auth method 'cookie' needs 'cookie' or 'cookie_file'";
+    } else {
+        return "auth method must be basic, form or cookie (got '" +
+               a.method + "')";
+    }
+    return "";
 }
 
 // Directory containing the running executable. /proc/self/exe is exact on
@@ -89,10 +135,24 @@ int run_scan(sln::ScanConfig& cfg, const char* argv0) {    if (cfg.targets.empty
         return 2;
     }
 
-    // Safe mode is non-intrusive by definition: it overrides --fuzz.
+    // Safe mode is non-intrusive by definition: it overrides --fuzz and the
+    // delay-based parametric probes.
     if (cfg.safe && cfg.fuzz) {
         std::cout << "[safe mode] fuzzing disabled (--safe overrides -f)\n";
         cfg.fuzz = false;
+    }
+    if (cfg.safe && cfg.time_probes) {
+        std::cout << "[safe mode] time-based probes disabled (--safe "
+                     "overrides --time-probes)\n";
+        cfg.time_probes = false;
+    }
+
+    // Authenticated scanning: validate the config before touching targets.
+    if (!cfg.auth_file.empty()) {
+        if (std::string err = parse_auth_file(cfg); !err.empty()) {
+            std::cerr << "error: " << err << "\n";
+            return 2;
+        }
     }
 
     // Timing profile: fill unset options from the profile; explicitly given
@@ -280,6 +340,25 @@ std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
                    "Disable active CVE verification (Log4Shell canary, "
                    "CVE-record probes); findings stay 'potential'");
 
+    // Authenticated scanning
+    scan->add_option("--auth", cfg.auth_file,
+                     "Authenticated scanning: JSON file with {method: "
+                     "basic|form|cookie, user/password | url+fields+success | "
+                     "cookie/cookie_file, hosts: [scope]}");
+
+    // Directory brute-force
+    scan->add_flag("--dirb", cfg.dirb,
+                   "Discover hidden paths with a wordlist (built-in or "
+                   "--wordlist); GET-only, reports 2xx/401/403");
+    scan->add_option("--wordlist", cfg.wordlist_path,
+                     "Wordlist file for --dirb (one path per line)")
+        ->capture_default_str();
+
+    // Delay-based parametric probes
+    scan->add_flag("--time-probes", cfg.time_probes,
+                   "Enable time-based SQLi and blind command-injection "
+                   "probes (each costs seconds; never in --safe)");
+
     // CI gate
     scan->add_option("--fail-on", cfg.fail_on,
                      "Exit with code 3 when findings reach SEVERITY "
@@ -356,6 +435,25 @@ void show_settings(const sln::ScanConfig& cfg) {
               << "fuzz_max_len   : " << cfg.fuzz_max_len << "\n"
               << "fuzz_delay_ms  : " << cfg.fuzz_delay_ms << "\n"
               << "verify         : " << (cfg.no_verify ? "off" : "on") << "\n"
+              << "auth           : "
+              << (cfg.auth.enabled()
+                      ? cfg.auth.method +
+                            (cfg.auth.hosts.empty()
+                                 ? " (*)"
+                                 : " (" +
+                                       [&] {
+                                           std::string s;
+                                           for (const auto& h : cfg.auth.hosts)
+                                               s += (s.empty() ? "" : ",") + h;
+                                           return s;
+                                       }() +
+                                       ")")
+                      : "(none)")
+              << "\n"
+              << "dirb           : " << (cfg.dirb ? "on" : "off")
+              << (cfg.wordlist_path.empty() ? "" : " (" + cfg.wordlist_path + ")")
+              << "\n"
+              << "time_probes    : " << (cfg.time_probes ? "on" : "off") << "\n"
               << "plugins        : "
               << (cfg.disable_plugins ? "disabled" : cfg.plugins_dir) << "\n"
               << "data_dir       : " << cfg.data_dir << "\n"

@@ -5,6 +5,7 @@
 #include <cctype>
 #include <deque>
 #include <set>
+#include <sstream>
 
 namespace sln {
 
@@ -237,7 +238,7 @@ bool is_csrf_field(const std::string& field_name) {
 // Resolves href (relative, root-relative or absolute) against the base path
 // and the crawl scope. Returns "" when the target is out of scope.
 std::string resolve_in_scope(const std::string& base_path,
-                             const std::string& href,
+                              const std::string& href,
                              const CrawlConfig& cfg) {
     std::string resolved = resolve_url(base_path, href);
     if (resolved.empty()) return "";
@@ -271,6 +272,88 @@ std::string snippet(const std::string& s, size_t max = 200) {
     for (char& c : one)
         if (c == '\n' || c == '\r' || c == '\t') c = ' ';
     return one.substr(0, max);
+}
+
+// <loc>URL</loc> entries of a sitemap (or sitemap index).
+std::vector<std::string> extract_sitemap_locs(const std::string& body) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while ((pos = body.find("<loc>", pos)) != std::string::npos) {
+        size_t end = body.find("</loc>", pos);
+        if (end == std::string::npos) break;
+        out.push_back(trim(body.substr(pos + 5, end - pos - 5)));
+        pos = end + 6;
+    }
+    return out;
+}
+
+// Same-origin <script src="..."> references.
+std::vector<std::string> extract_script_srcs(const std::string& html) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    for (;;) {
+        size_t lt = html.find("<script", pos);
+        if (lt == std::string::npos) break;
+        size_t gt = html.find('>', lt);
+        if (gt == std::string::npos) break;
+        std::string tag = html.substr(lt, gt - lt);
+        pos = gt + 1;
+        // src="..." or src='...'
+        size_t s = tag.find("src");
+        if (s == std::string::npos) continue;
+        size_t q1 = tag.find_first_of("\"'", s);
+        if (q1 == std::string::npos) continue;
+        char q = tag[q1];
+        size_t q2 = tag.find(q, q1 + 1);
+        if (q2 == std::string::npos) continue;
+        std::string src = tag.substr(q1 + 1, q2 - q1 - 1);
+        if (!src.empty()) out.push_back(src);
+    }
+    return out;
+}
+
+// Endpoint paths referenced from JavaScript: fetch/axios/XHR calls and
+// url: literals. Only same-origin root-relative paths are of interest.
+std::vector<std::string> extract_js_endpoints(const std::string& js) {
+    static const char* call_prefixes[] = {
+        "fetch(",       ".get(",       ".post(",     ".put(",
+        ".delete(",     ".ajax(",      "open(",      "load("};
+    std::vector<std::string> out;
+    auto grab_string = [&](size_t at, char quote, std::string& value) {
+        size_t q = js.find(quote, at);
+        if (q == std::string::npos) return false;
+        size_t q2 = js.find(quote, q + 1);
+        if (q2 == std::string::npos) return false;
+        value = js.substr(q + 1, q2 - q - 1);
+        return true;
+    };
+    for (const char* prefix : call_prefixes) {
+        size_t plen = std::char_traits<char>::length(prefix);
+        size_t pos = 0;
+        while ((pos = js.find(prefix, pos)) != std::string::npos) {
+            pos += plen;
+            std::string value;
+            if (grab_string(pos, '"', value) || grab_string(pos, '\'', value)) {
+                if (!value.empty() && value[0] == '/' && value[1] != '/')
+                    out.push_back(value);
+            }
+        }
+    }
+    // url: "/path" object literals (axios/jQuery style)
+    size_t pos = 0;
+    while ((pos = js.find("url", pos)) != std::string::npos) {
+        pos += 3;
+        size_t colon = js.find_first_not_of(" \t", pos);
+        if (colon == std::string::npos || js[colon] != ':') continue;
+        std::string value;
+        size_t after = js.find_first_not_of(" \t", colon + 1);
+        if (after == std::string::npos) continue;
+        if (grab_string(after, js[after] == '"' ? '"' : '\'', value)) {
+            if (!value.empty() && value[0] == '/' && value[1] != '/')
+                out.push_back(value);
+        }
+    }
+    return out;
 }
 
 } // namespace
@@ -370,6 +453,33 @@ CrawlResult crawl_site(const HttpFetcher& fetch, const std::string& start_path,
 
     queue.push_back({normalize_path(start_path), 0});
 
+    // robots.txt: Disallow/Sitemap entries seed the queue — the paths a site
+    // tries to hide from crawlers are prime audit targets.
+    if (cfg.seed_robots) {
+        if (auto robots = fetch("/robots.txt");
+            robots && robots->status == 200) {
+            std::istringstream ss(robots->body);
+            std::string line;
+            while (std::getline(ss, line)) {
+                line = trim(line);
+                std::string low = to_lower(line);
+                for (const char* key : {"disallow:", "allow:", "sitemap:"}) {
+                    size_t klen = std::char_traits<char>::length(key);
+                    if (low.rfind(key, 0) != 0) continue;
+                    std::string target_src =
+                        trim(line.substr(klen));
+                    if (target_src.empty()) continue;
+                    std::string resolved =
+                        resolve_in_scope("/robots.txt", target_src, cfg);
+                    if (!resolved.empty())
+                        queue.push_back({resolved, 1});
+                }
+            }
+        }
+    }
+
+    std::set<std::string> js_fetched;
+
     while (!queue.empty() &&
            static_cast<int>(out.pages.size()) < cfg.max_pages) {
         auto [path, depth] = queue.front();
@@ -397,6 +507,18 @@ CrawlResult crawl_site(const HttpFetcher& fetch, const std::string& start_path,
 
         if (resp->body.empty()) continue;
 
+        // sitemap documents: follow <loc> entries
+        if (resp->body.find("<urlset") != std::string::npos ||
+            resp->body.find("<sitemapindex") != std::string::npos) {
+            for (const auto& loc : extract_sitemap_locs(resp->body)) {
+                std::string resolved = resolve_in_scope(path, loc, cfg);
+                if (resolved.empty()) continue;
+                UrlParts rup = split_url(resolved);
+                if (!visited.count(page_key(rup)))
+                    queue.push_back({join_url(rup), depth + 1});
+            }
+        }
+
         // links
         if (depth < cfg.max_depth) {
             for (const auto& href : extract_links(resp->body)) {
@@ -405,6 +527,26 @@ CrawlResult crawl_site(const HttpFetcher& fetch, const std::string& start_path,
                 UrlParts rup = split_url(resolved);
                 if (!visited.count(page_key(rup)))
                     queue.push_back({join_url(rup), depth + 1});
+            }
+        }
+
+        // linked scripts: fetch once, harvest endpoint references
+        if (depth < cfg.max_depth &&
+            static_cast<int>(js_fetched.size()) < cfg.max_js) {
+            for (const auto& src : extract_script_srcs(resp->body)) {
+                if (static_cast<int>(js_fetched.size()) >= cfg.max_js) break;
+                std::string resolved = resolve_in_scope(path, src, cfg);
+                if (resolved.empty() || js_fetched.count(resolved)) continue;
+                auto js = fetch(resolved);
+                if (!js || js->body.empty()) continue;
+                js_fetched.insert(resolved);
+                for (const auto& endpoint : extract_js_endpoints(js->body)) {
+                    std::string target = resolve_in_scope(path, endpoint, cfg);
+                    if (target.empty()) continue;
+                    UrlParts tup = split_url(target);
+                    if (!visited.count(page_key(tup)))
+                        queue.push_back({join_url(tup), depth + 1});
+                }
             }
         }
 

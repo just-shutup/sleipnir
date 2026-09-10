@@ -166,7 +166,10 @@ bool write_json_report(const std::string& path,
           {"timeout_ms", cfg.timeout_ms},
           {"fuzz", cfg.fuzz},
           {"plugins_disabled", cfg.disable_plugins},
-          {"verify", !cfg.no_verify}}}};
+          {"verify", !cfg.no_verify},
+          {"dirb", cfg.dirb},
+          {"time_probes", cfg.time_probes},
+          {"auth", cfg.auth.enabled() ? cfg.auth.method : "none"}}}};
     std::set<std::string> unique_hosts;
     for (const auto& p : ports) unique_hosts.insert(p.host);
     report["stats"] = {

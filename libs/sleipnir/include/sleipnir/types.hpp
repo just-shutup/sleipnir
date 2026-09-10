@@ -118,6 +118,28 @@ struct Finding {
     std::shared_ptr<const VulnCheck> check;
 };
 
+// Authenticated scanning (--auth FILE): how to obtain a session and which
+// hosts it applies to. The resulting headers ride on every request of the
+// HTTP pipeline (checks, crawler, verification), unlocking the area behind
+// the login form.
+struct AuthConfig {
+    std::string method;   // "basic" | "form" | "cookie"
+    std::string url;      // form: absolute login URL (scheme://host[:port]/path)
+    std::string user;     // basic: username
+    std::string password; // basic: password
+    std::map<std::string, std::string> fields; // form: POST fields
+    std::string success;  // form: marker proving the login worked
+    std::string cookie;      // cookie: literal Cookie header value
+    std::string cookie_file; // cookie: Netscape cookie-jar file path
+    // Scope: hosts (as scanned) the credentials belong to. "*" or empty ->
+    // every target (the sensible default for single-target scans).
+    std::vector<std::string> hosts;
+
+    bool enabled() const {
+        return method == "basic" || method == "form" || method == "cookie";
+    }
+};
+
 struct ScanConfig {
     std::vector<std::string> targets;
     std::string ports = "top100";
@@ -162,6 +184,18 @@ struct ScanConfig {
     // "check" block gets its probes executed and the finding upgraded from
     // potential to confirmed when a marker returns.
     bool no_verify = false;
+
+    // Authenticated scanning (--auth FILE): parsed AuthConfig.
+    AuthConfig auth;
+    std::string auth_file;
+
+    // Directory brute-force (--dirb) with the built-in or --wordlist list.
+    bool dirb = false;
+    std::string wordlist_path; // empty -> built-in list
+
+    // Delay-based parametric probes (time-based SQLi, blind command
+    // injection): opt-in because every probe costs seconds of wall clock.
+    bool time_probes = false;
 
     // CI gate (--fail-on SEVERITY): empty -> disabled.
     std::string fail_on;

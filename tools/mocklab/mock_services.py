@@ -1035,6 +1035,143 @@ class JenkinsHardenedHandler(JenkinsHandler):
     cli_vulnerable = False
 
 
+import base64 as _base64
+
+
+class AuthAppHandler(BaseHTTPRequestHandler):
+    """An application with an area behind a login (for --auth e2e):
+    POST /login sets a session cookie, /admin/* requires it (or HTTP
+    Basic). The admin search reflects its q parameter — a verified XSS
+    that only exists behind the authentication the scanner carries."""
+
+    server_version = "authapp/1.0"
+
+    def _authed(self):
+        cookie = self.headers.get("Cookie") or ""
+        if "slnsession=authok42" in cookie:
+            return True
+        auth = self.headers.get("Authorization") or ""
+        if auth.startswith("Basic "):
+            try:
+                decoded = _base64.b64decode(auth[6:]).decode()
+                if decoded == "admin:s3cret":
+                    return True
+            except Exception:
+                pass
+        return False
+
+    def do_GET(self):
+        path, _, query = self.path.partition("?")
+        params = dict(
+            kv.split("=", 1) for kv in query.split("&") if "=" in kv
+        )
+        if path == "/robots.txt":
+            body = (
+                b"User-agent: *\n"
+                b"Disallow: /admin\n"
+                b"Disallow: /admin/dashboard\n"
+                b"Disallow: /admin/search\n"
+                b"Sitemap: http://127.0.0.1:8096/sitemap.xml\n"
+            )
+            self._send(200, body, "text/plain")
+        elif path == "/sitemap.xml":
+            body = (
+                b'<?xml version="1.0" encoding="UTF-8"?>'
+                b'<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">'
+                b"<url><loc>http://127.0.0.1:8096/</loc></url>"
+                b"</urlset>"
+            )
+            self._send(200, body, "application/xml")
+        elif path == "/":
+            body = (
+                b"<!DOCTYPE html><html><head><title>MockApp</title></head>"
+                b"<body><h1>MockApp</h1>"
+                b"<form action='/login' method='POST'>"
+                b"<input type='hidden' name='csrf_token' value='t9'>"
+                b"<input name='user'><input type='password' name='pass'>"
+                b"<button>Sign in</button></form></body></html>"
+            )
+            self._send(200, body, "text/html")
+        elif path == "/admin" or path == "/admin/dashboard":
+            if not self._authed():
+                self._redirect("/login")
+                return
+            body = (
+                b"<!DOCTYPE html><html><body><h1>Admin dashboard</h1>"
+                b"<p>SECRET-AREA: db password hunter2</p>"
+                b"<a href='/admin/search?q=hello'>Search</a><br>"
+                b"<a href='/admin/profile?user=1'>My profile</a>"
+                b"</body></html>"
+            )
+            self._send(200, body, "text/html")
+        elif path == "/admin/search":
+            if not self._authed():
+                self._redirect("/login")
+                return
+            q = params.get("q", "")
+            body = (
+                b"<html><body><h1>Results for: " + q.encode() +
+                b"</h1></body></html>"
+            )
+            self._send(200, body, "text/html")
+        elif path == "/admin/profile":
+            if not self._authed():
+                self._redirect("/login")
+                return
+            user = params.get("user", "1")
+            users = {
+                "1": "alice@example.test",
+                "2": "bob@example.test",
+                "3": "carol@example.test",
+            }
+            email = users.get(user, "unknown")
+            body = (
+                "<html><body><h1>User " + html.escape(user) + "</h1>"
+                "<p>email: " + email + "</p></body></html>"
+            ).encode()
+            self._send(200, body, "text/html")
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(length) if length else b""
+        if self.path.split("?")[0] == "/login":
+            fields = dict(
+                kv.split("=", 1) for kv in body.decode().split("&")
+                if "=" in kv
+            )
+            if fields.get("user") == "admin" and fields.get("pass") == "s3cret":
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html")
+                self.send_header(
+                    "Set-Cookie", "slnsession=authok42; Path=/; HttpOnly"
+                )
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+            else:
+                self._send(401, b"<html><body>Invalid credentials</body></html>",
+                           "text/html")
+        else:
+            self._send(404, b"not found", "text/plain")
+
+    def _redirect(self, to):
+        self.send_response(302)
+        self.send_header("Location", to)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def _send(self, code, body, ctype):
+        self.send_response(code)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt, *args):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # UDP services (Sleipnir --udp probe targets; all ports >1024 so the lab
 # runs unprivileged)
@@ -1128,6 +1265,7 @@ SERVICES = [
     ("bigip-hardened", 8093, BigIpHardenedHandler, LabHTTPServer),
     ("jenkins-vuln", 8094, JenkinsHandler, LabHTTPServer),
     ("jenkins-hardened", 8095, JenkinsHardenedHandler, LabHTTPServer),
+    ("authapp", 8096, AuthAppHandler, LabHTTPServer),
 ]
 
 class Ipv6TcpServer(socketserver.ThreadingTCPServer):
