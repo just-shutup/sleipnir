@@ -140,7 +140,10 @@ CveDb CveDb::load(const std::string& path) {
     }
 
     CveDb db;
+    db.db_version_ = root.value("_db_version", "");
     for (const auto& [key, value] : root.items()) {
+        // metadata keys (_db_version, ...) are not product entries
+        if (!value.is_object()) continue;
         ProductEntry p;
         p.product = value.value("product", key);
         p.aliases.push_back(lower(key));

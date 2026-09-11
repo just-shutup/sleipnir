@@ -1,4 +1,5 @@
 {
+  "db_version": "2026.09",
   "probes": [
     {
       "name": "NULL-banner",
@@ -191,6 +192,104 @@
           "regex": "Server:\\s*lighttpd/([\\d.]+)",
           "product": "lighttpd",
           "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "X-Powered-By:\\s*Express",
+          "product": "Express"
+        },
+        {
+          "service": "http",
+          "regex": "X-Application-Context:\\s*\\S+",
+          "product": "Spring Boot"
+        },
+        {
+          "service": "http",
+          "regex": "X-Seraph-Loginreason",
+          "product": "Jira"
+        },
+        {
+          "service": "http",
+          "regex": "GitLab",
+          "product": "GitLab"
+        },
+        {
+          "service": "http",
+          "regex": "[Cc]onfluence",
+          "product": "Confluence"
+        },
+        {
+          "service": "http",
+          "regex": "phpMyAdmin\\s+(?:</span>)?([\\d.]+)",
+          "product": "phpMyAdmin",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "phpMyAdmin",
+          "product": "phpMyAdmin"
+        },
+        {
+          "service": "http",
+          "regex": "<meta name=\"generator\" content=\"Drupal ([\\d.]+)\"",
+          "product": "Drupal",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "<meta name=\"generator\" content=\"Joomla!",
+          "product": "Joomla"
+        },
+        {
+          "service": "http",
+          "regex": "1C-Bitrix",
+          "product": "Bitrix"
+        },
+        {
+          "service": "http",
+          "regex": "Powered by Gitea|<title>Gitea",
+          "product": "Gitea"
+        },
+        {
+          "service": "http",
+          "regex": "<title>Harbor</title>|<harbor-app>",
+          "product": "Harbor"
+        },
+        {
+          "service": "http",
+          "regex": "Keycloak",
+          "product": "Keycloak"
+        },
+        {
+          "service": "http",
+          "regex": "<title>Prometheus",
+          "product": "Prometheus"
+        },
+        {
+          "service": "http",
+          "regex": "\"kind\":\"APIVersions\"",
+          "product": "Kubernetes"
+        },
+        {
+          "service": "http",
+          "regex": "\"etcdserver\":\"([\\d.]+)\"",
+          "product": "etcd",
+          "version_group": 1
+        },
+        {
+          "service": "http",
+          "regex": "<title>RabbitMQ",
+          "product": "RabbitMQ Management"
+        },
+        {
+          "service": "http",
+          "regex": "<title>Solr Admin",
+          "product": "Apache Solr"
+        },
+        {
+          "service": "http",
+          "regex": "Roundcube|_rcmail",
+          "product": "Roundcube"
         },
         {
           "service": "http",

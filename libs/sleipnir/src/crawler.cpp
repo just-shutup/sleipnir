@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <deque>
 #include <set>
 #include <sstream>
@@ -914,6 +915,220 @@ std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,
                     snippet(resp->body.substr(
                         std::max(0, static_cast<int>(pos) - 30), 120)) +
                     "...");
+        }
+    }
+
+    // Boolean-based SQL injection: append ' and '1'='1 (true) and
+    // ' and '1'='2 (false) to the value; a vulnerable app answers the true
+    // probe like the baseline and the false probe differently. The false
+    // probe is repeated to filter volatile pages, and the true probe must
+    // match the baseline within 10% so plain reflections never qualify.
+    if (cfg.probe_bool_sqli) {
+        int param_budget = 15; // cap: 4 requests per parameter
+        for (const auto& url : crawl.param_urls) {
+            if (budget <= 0 || param_budget <= 0) break;
+            UrlParts up = split_url(url);
+            for (auto& [name, value] : up.params) {
+                if (budget < 4 || param_budget <= 0) break;
+                param_budget--;
+                budget -= 4;
+                std::string orig = value;
+
+                value = orig;
+                auto baseline = fetch(join_url(up));
+                if (!baseline || baseline->status != 200 ||
+                    baseline->body.empty())
+                    continue;
+
+                value = orig + "' and '1'='1";
+                auto true_r = fetch(join_url(up));
+                if (!true_r || true_r->status != 200) continue;
+                size_t bl = baseline->body.size(), tl = true_r->body.size();
+                if (tl < bl * 9 / 10 || tl > bl * 11 / 10) continue;
+
+                auto differs = [&](const HttpResponse& r) {
+                    if (r.status != baseline->status) return true;
+                    size_t rl = r.body.size();
+                    return rl < bl * 3 / 4 || rl > bl * 5 / 4;
+                };
+                value = orig + "' and '1'='2";
+                auto false_r = fetch(join_url(up));
+                if (!false_r || !differs(*false_r)) continue;
+                auto false_r2 = fetch(join_url(up)); // stability check
+                if (!false_r2 || !differs(*false_r2)) continue;
+                if (false_r->body != false_r2->body) continue;
+
+                value = orig; // restore before reporting
+                size_t pos = false_r->body.find_first_not_of(" \t\r\n");
+                add("Boolean-based SQL injection in parameter", Severity::High,
+                    std::string("The parameter '") + name +
+                        "' changes the response when a SQL condition is "
+                        "injected: '1'='1 answers like the original value, "
+                        "'1'='2 produces a stable, different result. The "
+                        "value reaches a SQL query unescaped. Use "
+                        "parameterized queries / prepared statements.",
+                    "GET " + join_url(up) + " -> baseline " +
+                        std::to_string(baseline->status) + "/" +
+                        std::to_string(bl) + "B, '1'='1 " +
+                        std::to_string(true_r->status) + "/" +
+                        std::to_string(tl) + "B, '1'='2 " +
+                        std::to_string(false_r->status) + "/" +
+                        std::to_string(false_r->body.size()) + "B: ..." +
+                        snippet(false_r->body.substr(pos == std::string::npos
+                                                         ? 0
+                                                         : pos,
+                                                     100)) +
+                        "...");
+                break;
+            }
+        }
+    }
+
+    // Time-based probes (--time-probes): SQL SLEEP/WAITFOR/pg_sleep
+    // payloads and blind command injection. A delay beyond the threshold
+    // proves the payload was evaluated by the backend.
+    if (cfg.time_probes) {
+        auto timed_fetch = [&](const std::string& url,
+                               int& elapsed_ms) -> std::optional<HttpResponse> {
+            auto t0 = std::chrono::steady_clock::now();
+            auto r = fetch(url);
+            elapsed_ms = static_cast<int>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - t0)
+                    .count());
+            return r;
+        };
+        // limit: each parameter costs up to 5 requests
+        int param_budget = 8;
+        for (const auto& url : crawl.param_urls) {
+            if (budget <= 0 || param_budget <= 0) break;
+            UrlParts up = split_url(url);
+            for (auto& [name, value] : up.params) {
+                if (budget <= 0 || param_budget <= 0) break;
+                param_budget--;
+                std::string orig = value;
+                bool hit = false;
+
+                struct TimedPayload {
+                    const char* payload;
+                    const char* what;
+                };
+                static const TimedPayload sql_payloads[] = {
+                    {"' AND SLEEP(5) AND 'a'='a", "MySQL SLEEP"},
+                    {"'; WAITFOR DELAY '0:0:5'--", "MSSQL WAITFOR DELAY"},
+                    {"' AND 1=(SELECT 1 FROM pg_sleep(5))--", "pg_sleep"},
+                };
+                for (const auto& sp : sql_payloads) {
+                    if (budget-- <= 0) break;
+                    int ms = 0;
+                    value = orig + sp.payload;
+                    auto r = timed_fetch(join_url(up), ms);
+                    value = orig;
+                    if (!r || ms < cfg.time_threshold_ms) continue;
+                    add("Time-based SQL injection in parameter", Severity::High,
+                        std::string("The parameter '") + name +
+                            "' delayed the response by " +
+                            std::to_string(ms) + " ms when a " + sp.what +
+                            " expression was injected: the value reaches a "
+                            "SQL query unescaped and the backend executed "
+                            "it. Use parameterized queries.",
+                        "GET " + join_url(up) + " -> delayed " +
+                            std::to_string(ms) + " ms with " + sp.payload);
+                    hit = true;
+                    break;
+                }
+                if (hit) break;
+
+                static const char* cmd_payloads[] = {
+                    ";sleep 6", "| sleep 6", "&& sleep 6"};
+                for (const char* cp : cmd_payloads) {
+                    if (budget-- <= 0) break;
+                    int ms = 0;
+                    value = orig + cp;
+                    auto r = timed_fetch(join_url(up), ms);
+                    value = orig;
+                    if (!r || ms < cfg.time_threshold_ms) continue;
+                    add("Blind OS command injection in parameter",
+                        Severity::Critical,
+                        std::string("The parameter '") + name +
+                            "' delayed the response by " +
+                            std::to_string(ms) +
+                            " ms when a sleep command was appended: the "
+                            "value reaches a shell command unescaped and "
+                            "the operating system executed it. Never pass "
+                            "user input to a shell; use argv-style APIs.",
+                        "GET " + join_url(up) + " -> delayed " +
+                            std::to_string(ms) + " ms with '" + cp + "'");
+                    hit = true;
+                    break;
+                }
+                if (hit) break;
+            }
+        }
+    }
+
+    // IDOR heuristic (authenticated): numeric id-like parameters return
+    // neighbouring records for the same session. Reported as potential —
+    // proving unauthorized access needs a second identity.
+    if (cfg.probe_idor && cfg.has_session) {
+        static const char* idor_params[] = {
+            "id", "uid", "user", "user_id", "userid", "doc", "document",
+            "order", "account", "item", "post", "record", "file_id"};
+        for (const auto& url : crawl.param_urls) {
+            if (budget <= 0) break;
+            UrlParts up = split_url(url);
+            for (auto& [name, value] : up.params) {
+                bool match = false;
+                for (const char* p : idor_params)
+                    if (to_lower(name) == p) { match = true; break; }
+                if (!match || value.empty() ||
+                    !std::all_of(value.begin(), value.end(), ::isdigit))
+                    continue;
+                if (budget-- <= 0) break;
+                std::string orig = value;
+                auto baseline = fetch(join_url(up));
+                if (!baseline || baseline->status != 200) continue;
+                int base_id = 0;
+                try {
+                    base_id = std::stoi(orig);
+                } catch (...) {
+                    // Ignore numeric identifiers outside the probe range.
+                    value = orig;
+                    continue;
+                }
+                for (int nid : {base_id - 1, base_id + 1}) {
+                    if (nid < 0) continue;
+                    value = std::to_string(nid);
+                    auto r = fetch(join_url(up));
+                    value = orig;
+                    if (!r || r->status != 200) continue;
+                    if (r->body == baseline->body || r->body.size() < 80)
+                        continue;
+                    Finding f;
+                    f.host = host;
+                    f.port = port;
+                    f.title = "Possible insecure direct object reference (IDOR)";
+                    f.severity = Severity::Medium;
+                    f.description =
+                        std::string("The parameter '") + name +
+                        "' returns different records for neighbouring "
+                        "values (" + orig + " -> " + std::to_string(nid) +
+                        ") under the same session. If these records belong "
+                        "to other users, authorization is missing on the "
+                        "object level. Verify with a second account and "
+                        "enforce per-object access checks.";
+                    f.evidence = "GET " + join_url(up) + " with " + name +
+                                 "=" + std::to_string(nid) +
+                                 " -> 200, different content: ..." +
+                                 snippet(r->body.substr(0, 100)) + "...";
+                    f.source = "webapp";
+                    f.verified = false; // heuristic, not a proof
+                    f.confidence = "potential";
+                    out.push_back(std::move(f));
+                    break;
+                }
+                break;
+            }
         }
     }
 

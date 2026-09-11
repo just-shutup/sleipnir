@@ -616,8 +616,14 @@ class VulnWebHandler(BaseHTTPRequestHandler):
             kv.split("=", 1) for kv in query.split("&") if "=" in kv
         )
         if path == "/":
+            xfh = self.headers.get("X-Forwarded-Host")
+            base_tag = (
+                '<base href="http://%s/">' % xfh if xfh else ""
+            )
             body = (
-                b"<!DOCTYPE html><html><head><title>VulnWeb</title></head><body>"
+                b"<!DOCTYPE html><html><head><title>VulnWeb</title>"
+                + base_tag.encode() +
+                b"</head><body>"
                 b"<h1>VulnWeb</h1>"
                 b"<a href='/search?q=hello'>Search</a><br>"
                 b"<a href='/profile?page=welcome'>Profile</a><br>"
@@ -625,6 +631,9 @@ class VulnWebHandler(BaseHTTPRequestHandler):
                 b"<a href='/render?tpl=Welcome'>Render</a><br>"
                 b"<a href='/fetch?url=http%3A%2F%2Fexample.test%2Ffeed'>"
                 b"Fetch feed</a><br>"
+                b"<a href='/item?id=1'>Item</a><br>"
+                b"<a href='/report?id=1'>Report</a><br>"
+                b"<a href='/ping?host=127.0.0.1'>Ping</a><br>"
                 b"<a href='https://example.org/external'>External link</a>"
                 b"<form action='/login' method='POST'>"
                 b"<input name='user'><input type='password' name='pass'>"
@@ -635,6 +644,55 @@ class VulnWebHandler(BaseHTTPRequestHandler):
                 b"</body></html>"
             )
             self._send(200, body, "text/html")
+        elif path == "/item":
+            # boolean-based SQLi: '1'='1 answers like the baseline row,
+            # '1'='2 returns an empty result set
+            item_id = params.get("id", "1")
+            if "'" in item_id:
+                if "'1'='1" in item_id:
+                    body = b"<html><body>Item 1: standard issue widget"
+                else:
+                    body = b"<html><body>Item not found"
+                body += b"</body></html>"
+                self._send(200, body, "text/html")
+            elif item_id == "1":
+                self._send(
+                    200, b"<html><body>Item 1: standard issue widget"
+                         b"</body></html>", "text/html")
+            else:
+                self._send(
+                    200, b"<html><body>Item not found</body></html>",
+                    "text/html")
+        elif path == "/report":
+            # time-based SQLi: the backend executes injected SLEEP /
+            # WAITFOR / pg_sleep expressions (3 s here, so default
+            # timeouts still observe the delay)
+            rid = params.get("id", "1")
+            if ("SLEEP(5)" in rid or "pg_sleep" in rid
+                    or "WAITFOR" in rid):
+                time.sleep(3)
+                self._send(200, b"<html><body>Report generated"
+                                 b"</body></html>", "text/html")
+            else:
+                body = ("<html><body>Report " + html.escape(rid) +
+                        " generated</body></html>").encode()
+                self._send(200, body, "text/html")
+        elif path == "/ping":
+            # blind command injection: a shell-style sleep command in the
+            # value is executed (3 s delay in the mock); SQL payloads
+            # (SLEEP(5), pg_sleep) are NOT executed by this endpoint
+            target = params.get("host", "")
+            is_cmd = (";" in target or "|" in target or "&&" in target) and (
+                "sleep" in target.lower()
+            )
+            if is_cmd:
+                time.sleep(3)
+                self._send(200, b"<html><body>PING done</body></html>",
+                           "text/html")
+            else:
+                body = ("<html><body>PING " + html.escape(target) +
+                        " ok</body></html>").encode()
+                self._send(200, body, "text/html")
         elif path == "/search":
             # reflects the q parameter unencoded (XSS)
             q = params.get("q", "")
@@ -1129,14 +1187,15 @@ class AuthAppHandler(BaseHTTPRequestHandler):
                 return
             user = params.get("user", "1")
             users = {
-                "1": "alice@example.test",
-                "2": "bob@example.test",
-                "3": "carol@example.test",
+                "1": ("alice", "alice@example.test", "2021-03-14"),
+                "2": ("bob", "bob@example.test", "2022-07-01"),
+                "3": ("carol", "carol@example.test", "2023-11-30"),
             }
-            email = users.get(user, "unknown")
+            who, email, since = users.get(user, ("unknown", "", ""))
             body = (
-                "<html><body><h1>User " + html.escape(user) + "</h1>"
-                "<p>email: " + email + "</p></body></html>"
+                "<html><body><h1>User " + html.escape(user) + ": " + who +
+                "</h1><p>email: " + email + "</p>"
+                "<p>member since: " + since + "</p></body></html>"
             ).encode()
             self._send(200, body, "text/html")
         else:

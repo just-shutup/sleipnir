@@ -43,6 +43,7 @@ ProbeDb ProbeDb::load(const std::string& path) {
     }
 
     ProbeDb db;
+    db.db_version_ = root.value("db_version", "");
     for (const auto& j : root.at("probes")) {
         Probe p;
         p.name = j.at("name").get<std::string>();

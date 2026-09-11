@@ -41,8 +41,14 @@ public:
 
     size_t product_count() const { return products_.size(); }
 
+    // Knowledge base version from the "_db_version" top-level key
+    // ("" when the file does not carry one). Monotonic strings like
+    // "YYYY.MM" so lexicographic comparison orders releases.
+    const std::string& db_version() const { return db_version_; }
+
 private:
     std::vector<ProductEntry> products_;
+    std::string db_version_;
 };
 
 } // namespace sln

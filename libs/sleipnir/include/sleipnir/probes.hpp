@@ -44,8 +44,13 @@ public:
 
     const std::vector<Probe>& probes() const { return probes_; }
 
+    // Knowledge base version from the top-level "db_version" key
+    // ("" when absent).
+    const std::string& db_version() const { return db_version_; }
+
 private:
     std::vector<Probe> probes_;
+    std::string db_version_;
 };
 
 } // namespace sln

@@ -9,6 +9,7 @@
 
 #include "sleipnir/http_client.hpp"
 #include "sleipnir/results.hpp"
+#include "sleipnir/verify.hpp"
 
 #include <string>
 #include <utility>
@@ -332,6 +333,44 @@ std::vector<Finding> check_webapp_probes(Stream& stream,
                 "POST " + std::string(ep) + " with <?php echo(md5('sleipnir')); "
                 "?> -> md5 marker returned"));
             break;
+        }
+    }
+
+    // Request-header reflection: a controlled X-Forwarded-Host value echoed
+    // into the response is the classic cache-poisoning / password-reset
+    // poisoning vector. One request, marker-based.
+    {
+        const std::string marker = "sln-hdr-" + canary_token() + ".invalid";
+        HttpOptions reflect_opts;
+        reflect_opts.headers = {{"X-Forwarded-Host", marker}};
+        if (auto resp = http_request_ex(stream, "GET", host, port, "/",
+                                        timeout_ms, user_agent,
+                                        reflect_opts)) {
+            std::string evidence;
+            if (resp->body.find(marker) != std::string::npos) {
+                size_t pos = resp->body.find(marker);
+                size_t begin = pos > 40 ? pos - 40 : 0;
+                evidence = resp->body.substr(begin, 120);
+            } else {
+                for (const auto& [hname, hvalue] : resp->headers)
+                    if (hvalue.find(marker) != std::string::npos) {
+                        evidence = hname + ": " + hvalue;
+                        break;
+                    }
+            }
+            if (!evidence.empty()) {
+                for (char& c : evidence)
+                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+                add("Request header value reflected in response",
+                    Severity::Low,
+                    "The X-Forwarded-Host request header is echoed into the "
+                    "response. An attacker who can influence intermediate "
+                    "proxies (or a cache) can poison pages and "
+                    "password-reset links with a host they control. "
+                    "Normalize or ignore client-supplied forwarding headers.",
+                    "GET / with X-Forwarded-Host: " + marker +
+                        " -> value reflected: ..." + evidence + "...");
+            }
         }
     }
 

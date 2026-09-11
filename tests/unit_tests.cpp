@@ -7,6 +7,7 @@
 #include "sleipnir/dirb.hpp"
 #include "sleipnir/http_client.hpp"
 #include "sleipnir/cve_db.hpp"
+#include "sleipnir/probes.hpp"
 #include "sleipnir/fuzz.hpp"
 #include "sleipnir/plugins.hpp"
 #include "sleipnir/results.hpp"
@@ -18,10 +19,12 @@
 #include "sleipnir/version.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <fstream>
 #include <functional>
 #include <map>
+#include <thread>
 
 using namespace sln;
 
@@ -1702,4 +1705,254 @@ TEST_CASE("dirb reports served paths, filters soft 404s and known pages") {
     // /secret 404s (real 404) and /known was pre-discovered: not reported;
     // soft-404 candidates never hit the findings because every unknown
     // path mirrors the baseline (status 200, same body)
+}
+
+// ---------------------------------------------------------------------------
+// Parametric probes: boolean SQLi, time-based SQLi/cmd injection, IDOR,
+// header reflection, knowledge base versioning
+// ---------------------------------------------------------------------------
+
+TEST_CASE("boolean-based sqli probe requires a stable differential") {
+    CrawlResult crawl;
+    crawl.param_urls = {"/item?id=1", "/search?q=hello"};
+
+    // vulnerable: true-condition answers like the baseline, false-condition
+    // stably differs
+    HttpFetcher vuln = [](const std::string& url)
+        -> std::optional<HttpResponse> {
+        if (url.find("/item?") == 0) {
+            if (url.find("'1'='1") != std::string::npos)
+                return mk_response("Item 1: standard issue widget");
+            if (url.find("'1'='2") != std::string::npos)
+                return mk_response("Item not found");
+            return mk_response("Item 1: standard issue widget");
+        }
+        // search reflects: volatile for the true-probe tolerance check
+        size_t eq = url.find("q=");
+        return mk_response("Results for: " + url.substr(eq + 2));
+    };
+    ActiveProbeConfig cfg;
+    cfg.max_requests = 60;
+    auto out = check_crawled_app(vuln, crawl, "h", 80, cfg);
+    bool sqli = false;
+    for (const auto& f : out)
+        if (f.title == "Boolean-based SQL injection in parameter") {
+            sqli = true;
+            CHECK(f.verified);
+            CHECK(f.confidence == "confirmed");
+            CHECK(f.evidence.find("'1'='2") != std::string::npos);
+        }
+    CHECK(sqli);
+
+    // negative: non-differential responses (same body for every probe)
+    HttpFetcher flat = [](const std::string&)
+        -> std::optional<HttpResponse> {
+        return mk_response("Item 1: standard issue widget");
+    };
+    auto out2 = check_crawled_app(flat, crawl, "h", 80, cfg);
+    for (const auto& f : out2)
+        CHECK(f.title != "Boolean-based SQL injection in parameter");
+
+    // negative: volatile page (reflection changes sizes) never qualifies
+    HttpFetcher volatile_page = [](const std::string& url)
+        -> std::optional<HttpResponse> {
+        return mk_response("Results for: " + url);
+    };
+    auto out3 = check_crawled_app(volatile_page, crawl, "h", 80, cfg);
+    for (const auto& f : out3)
+        CHECK(f.title != "Boolean-based SQL injection in parameter");
+}
+
+TEST_CASE("time-based probes fire only past the threshold") {
+    CrawlResult crawl;
+    crawl.param_urls = {"/report?id=1", "/ping?host=127.0.0.1"};
+
+    // endpoint-aware fetcher: /report executes SQL, /ping executes shell
+    HttpFetcher delayed = [](const std::string& url)
+        -> std::optional<HttpResponse> {
+        bool sql_payload = url.find("SLEEP(5)") != std::string::npos ||
+                           url.find("pg_sleep") != std::string::npos ||
+                           url.find("WAITFOR") != std::string::npos;
+        bool cmd_payload = url.find(";sleep") != std::string::npos ||
+                           url.find("| sleep") != std::string::npos ||
+                           url.find("&& sleep") != std::string::npos;
+        bool sql_endpoint = url.find("/report?") == 0;
+        bool cmd_endpoint = url.find("/ping?") == 0;
+        if ((sql_endpoint && sql_payload) || (cmd_endpoint && cmd_payload)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            return mk_response("done");
+        }
+        if (sql_endpoint) return mk_response("Report 1 generated");
+        return mk_response("PING 127.0.0.1 ok");
+    };
+    ActiveProbeConfig cfg;
+    cfg.max_requests = 60;
+    cfg.time_probes = true;
+    cfg.time_threshold_ms = 100; // fast test threshold
+    auto out = check_crawled_app(delayed, crawl, "h", 80, cfg);
+    bool sqli = false, cmd = false;
+    for (const auto& f : out) {
+        if (f.title == "Time-based SQL injection in parameter") {
+            sqli = true;
+            CHECK(f.verified);
+            CHECK(f.confidence == "confirmed");
+        }
+        if (f.title == "Blind OS command injection in parameter") {
+            cmd = true;
+            CHECK(f.severity == Severity::Critical);
+        }
+    }
+    CHECK(sqli);
+    CHECK(cmd);
+
+    // same fetcher, probes disabled -> no time-based findings fire
+    ActiveProbeConfig off = cfg;
+    off.time_probes = false;
+    auto out2 = check_crawled_app(delayed, crawl, "h", 80, off);
+    for (const auto& f : out2) {
+        bool time_based = f.title == "Time-based SQL injection in parameter" ||
+                          f.title == "Blind OS command injection in parameter";
+        CHECK_FALSE(time_based);
+    }
+
+    // fast responses never cross the default threshold
+    HttpFetcher fast = [](const std::string&)
+        -> std::optional<HttpResponse> {
+        return mk_response("Report 1 generated");
+    };
+    ActiveProbeConfig strict = cfg;
+    strict.time_threshold_ms = 2500;
+    auto out3 = check_crawled_app(fast, crawl, "h", 80, strict);
+    for (const auto& f : out3)
+        CHECK(f.title != "Time-based SQL injection in parameter");
+}
+
+TEST_CASE("idor heuristic needs a session and neighbouring records") {
+    CrawlResult crawl;
+    crawl.param_urls = {"/admin/profile?user=1"};
+
+    auto make_fetch = [](bool differ) {
+        return [differ](const std::string& url)
+            -> std::optional<HttpResponse> {
+            if (url.find("user=2") != std::string::npos && differ)
+                return mk_response(
+                    "<html><body><h1>User 2: bob</h1>"
+                    "<p>email: bob@example.test</p>"
+                    "<p>member since: 2022-07-01</p></body></html>");
+            return mk_response(
+                "<html><body><h1>User 1: alice</h1>"
+                "<p>email: alice@example.test</p>"
+                "<p>member since: 2021-03-14</p></body></html>");
+        };
+    };
+
+    ActiveProbeConfig cfg;
+    cfg.max_requests = 20;
+    cfg.has_session = true;
+    auto out = check_crawled_app(make_fetch(true), crawl, "h", 80, cfg);
+    bool idor = false;
+    for (const auto& f : out)
+        if (f.title ==
+            "Possible insecure direct object reference (IDOR)") {
+            idor = true;
+            // heuristic evidence only — never marked confirmed
+            CHECK_FALSE(f.verified);
+            CHECK(f.confidence == "potential");
+            CHECK(f.evidence.find("user=2") != std::string::npos);
+        }
+    CHECK(idor);
+
+    // no session -> no IDOR probing at all
+    ActiveProbeConfig anon = cfg;
+    anon.has_session = false;
+    auto out2 = check_crawled_app(make_fetch(true), crawl, "h", 80, anon);
+    for (const auto& f : out2)
+        CHECK(f.title != "Possible insecure direct object reference (IDOR)");
+
+    // identical records for neighbours -> nothing to report
+    auto out3 = check_crawled_app(make_fetch(false), crawl, "h", 80, cfg);
+    for (const auto& f : out3)
+        CHECK(f.title != "Possible insecure direct object reference (IDOR)");
+}
+
+TEST_CASE("header reflection probe detects X-Forwarded-Host echo") {
+    // vulnerable: the marker lands in the response body
+    FakeStream s;
+    auto respond = [](const std::string& req) -> std::string {
+        if (req.find("X-Forwarded-Host: sln-hdr-") != std::string::npos) {
+            size_t p = req.find("sln-hdr-");
+            size_t e = req.find("\r\n", p);
+            std::string marker = req.substr(p, e - p);
+            return raw_response(
+                200, "<html><head><base href=\"http://" + marker +
+                         "/\"></head><body>ok</body></html>");
+        }
+        return raw_response(200, "<html><body>ok</body></html>");
+    };
+    struct ReflectStream {
+        std::function<std::string(const std::string&)> responder;
+        bool connect(const std::string&, uint16_t, int) { return true; }
+        std::string send_and_receive(std::string_view payload, int, size_t) {
+            return responder(std::string(payload));
+        }
+    };
+    ReflectStream vuln;
+    vuln.responder = respond;
+    auto out = check_webapp_probes(vuln, "h", 80, 100, "ua", false);
+    bool found = false;
+    for (const auto& f : out)
+        if (f.title == "Request header value reflected in response") {
+            found = true;
+            CHECK(f.verified);
+            CHECK(f.confidence == "confirmed");
+            CHECK(f.evidence.find("sln-hdr-") != std::string::npos);
+        }
+    CHECK(found);
+
+    // clean response -> no finding
+    ReflectStream clean;
+    clean.responder = [](const std::string&) {
+        return raw_response(200, "<html><body>ok</body></html>");
+    };
+    auto out2 = check_webapp_probes(clean, "h", 80, 100, "ua", false);
+    for (const auto& f : out2)
+        CHECK(f.title != "Request header value reflected in response");
+}
+
+TEST_CASE("knowledge bases carry versions and skip metadata keys") {
+    const char* path = "/tmp/sleipnir_test_dbver.json";
+    {
+        std::ofstream out(path);
+        out << R"({
+            "_db_version": "2026.09",
+            "testprod": {
+                "product": "TestProd",
+                "aliases": ["testprod"],
+                "vulns": [{"cve": "CVE-1000-0001", "affected": "<2.0"}]
+            }
+        })";
+    }
+    auto db = CveDb::load(path);
+    std::remove(path);
+    CHECK(db.db_version() == "2026.09");
+    CHECK(db.product_count() == 1); // _db_version is not a product
+    CHECK_FALSE(db.match("h", 1, "TestProd", "1.0").empty());
+
+    // shipped databases: versions present, metadata skipped
+    std::ifstream probe_file("data/service_probes.json");
+    if (probe_file.good()) {
+        auto probes = ProbeDb::load("data/service_probes.json");
+        CHECK(probes.db_version() == "2026.09");
+        CHECK(probes.probes().size() >= 7);
+    }
+    std::ifstream cve_file("data/cve_map.json");
+    if (cve_file.good()) {
+        auto cves = CveDb::load("data/cve_map.json");
+        CHECK(cves.db_version() == "2026.09");
+        CHECK(cves.product_count() >= 37);
+        // grown base: new products parse and match
+        CHECK_FALSE(cves.match("h", 1, "GitLab", "16.5.0").empty());
+        CHECK_FALSE(cves.match("h", 1, "Drupal", "7.57").empty());
+        CHECK(cves.match("h", 1, "GitLab", "16.8.0").empty());
+    }
 }

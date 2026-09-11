@@ -91,15 +91,24 @@ CrawlResult crawl_site(const HttpFetcher& fetch, const std::string& start_path,
 // ---------------------------------------------------------------------------
 
 struct ActiveProbeConfig {
-    int max_requests = 120; // total budget for active probes per job
+    int max_requests = 120; // shared budget for all active probes
     bool probe_xss = true;
     bool probe_traversal = true;
     bool probe_open_redirect = true;
     bool probe_ssti = true;      // {{7*7}}-style template arithmetic
     bool probe_ssrf = true;      // canary URL in fetch-like parameters
     bool probe_xxe = true;       // external entity with a local file marker
+    bool probe_bool_sqli = true; // differential ' and '1'='1 / '1'='2
+    bool probe_idor = true;      // numeric id params with a session
     bool check_csrf = true;
     bool allow_post = true;      // false in --safe: no state-changing requests
+    // --time-probes: delay-based SQLi (SLEEP/WAITFOR/pg_sleep) and blind
+    // command injection (sleep); opt-in because every hit costs seconds.
+    bool time_probes = false;
+    int time_threshold_ms = 2500; // response delay counted as an evaluation
+    // true when --auth established a session on this endpoint; IDOR probing
+    // only makes sense for an authenticated view.
+    bool has_session = false;
 };
 
 std::vector<Finding> check_crawled_app(const HttpFetcher& fetch,

@@ -231,7 +231,7 @@ int run_scan(sln::ScanConfig& cfg, const char* argv0) {    if (cfg.targets.empty
 int run_list_plugins(const sln::ScanConfig& cfg, const char* argv0) {
     sln::PluginHost host;
     auto reports = host.load_dir(auto_dir(cfg.plugins_dir.c_str(), "plugins",
-                                          exe_dir(argv0)));
+                                           exe_dir(argv0)));
     if (reports.empty())
         std::cout << "no plugins found in '" << cfg.plugins_dir << "'\n";
     for (const auto& r : reports) {
@@ -239,6 +239,153 @@ int run_list_plugins(const sln::ScanConfig& cfg, const char* argv0) {
                   << (r.error.empty() ? "  [ok]" : "  [error: " + r.error + "]")
                   << "\n";
     }
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Knowledge base management (sleipnir db status|update)
+// ---------------------------------------------------------------------------
+
+int run_db_status(const sln::ScanConfig& cfg, const char* argv0) {
+    std::string data = auto_dir(cfg.data_dir.c_str(), "data", exe_dir(argv0));
+    try {
+        auto cves = sln::CveDb::load(data + "/cve_map.json");
+        auto probes = sln::ProbeDb::load(data + "/service_probes.json");
+        std::cout << "data directory : " << data << "\n"
+                  << "cve_map        : " << cves.db_version() << " ("
+                  << cves.product_count() << " products)\n"
+                  << "service_probes : " << probes.db_version() << " ("
+                  << probes.probes().size() << " probe groups)\n";
+    } catch (const std::exception& e) {
+        std::cerr << "error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
+
+namespace {
+
+bool ends_with(const std::string& s, const std::string& suffix) {
+    return s.size() >= suffix.size() &&
+           s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// Finds cve_map.json in dir itself or one level of subdirectories.
+std::string locate_db_file(const std::string& dir, const char* name) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::path direct = fs::path(dir) / name;
+    if (fs::exists(direct, ec)) return direct.string();
+    for (const auto& entry : fs::directory_iterator(dir, ec)) {
+        if (!entry.is_directory()) continue;
+        fs::path nested = entry.path() / name;
+        if (fs::exists(nested, ec)) return nested.string();
+    }
+    return "";
+}
+
+bool copy_file_overwrite(const std::string& from, const std::string& to) {
+    namespace fs = std::filesystem;
+    std::error_code ec;
+    fs::copy_file(from, to, fs::copy_options::overwrite_existing, ec);
+    return !ec;
+}
+
+} // namespace
+
+int run_db_update(const std::string& raw_path, bool force,
+                  const sln::ScanConfig& cfg, const char* argv0) {
+    namespace fs = std::filesystem;
+    std::string data = auto_dir(cfg.data_dir.c_str(), "data", exe_dir(argv0));
+    std::string src = raw_path;
+    std::string tmp_root;
+
+    // .tar.gz archives are extracted with the system tar into a temp dir
+    if (ends_with(raw_path, ".tar.gz") || ends_with(raw_path, ".tgz")) {
+        tmp_root = "/tmp/sleipnir_db_XXXXXX";
+        if (char* d = mkdtemp(tmp_root.data()); d == nullptr) {
+            std::cerr << "error: cannot create temp directory\n";
+            return 1;
+        }
+        std::string cmd =
+            "tar -xzf '" + raw_path + "' -C '" + tmp_root + "' 2>/dev/null";
+        if (std::system(cmd.c_str()) != 0) {
+            std::cerr << "error: extraction failed (is tar installed and "
+                         "the path correct?)\n";
+            return 1;
+        }
+        src = tmp_root;
+    }
+
+    std::string new_cve = locate_db_file(src, "cve_map.json");
+    std::string new_probes = locate_db_file(src, "service_probes.json");
+    if (new_cve.empty() || new_probes.empty()) {
+        std::cerr << "error: the update must contain cve_map.json and "
+                     "service_probes.json (directory or .tar.gz)\n";
+        if (!tmp_root.empty()) fs::remove_all(tmp_root);
+        return 1;
+    }
+
+    // validate before installing: a broken update never replaces a
+    // working database
+    std::string new_cve_ver, new_probe_ver;
+    try {
+        auto cves = sln::CveDb::load(new_cve);
+        auto probes = sln::ProbeDb::load(new_probes);
+        new_cve_ver = cves.db_version();
+        new_probe_ver = probes.db_version();
+    } catch (const std::exception& e) {
+        std::cerr << "error: update rejected, invalid data: " << e.what()
+                  << "\n";
+        if (!tmp_root.empty()) fs::remove_all(tmp_root);
+        return 1;
+    }
+
+    // refuse downgrades unless forced
+    auto check_version = [&](const std::string& old_v, const std::string& new_v,
+                             const char* what) -> bool {
+        if (force || old_v.empty() || new_v >= old_v) return true;
+        std::cerr << "error: " << what << " downgrade (" << old_v << " -> "
+                  << new_v << "); use --force to override\n";
+        return false;
+    };
+    try {
+        if (!check_version(sln::CveDb::load(data + "/cve_map.json").db_version(),
+                           new_cve_ver, "cve_map") ||
+            !check_version(
+                sln::ProbeDb::load(data + "/service_probes.json").db_version(),
+                new_probe_ver, "service_probes")) {
+            if (!tmp_root.empty()) fs::remove_all(tmp_root);
+            return 1;
+        }
+    } catch (const std::exception&) {
+        // existing db unreadable: an update can only improve things
+    }
+
+    // install with .bak backups
+    bool ok = true;
+    auto install = [&](const std::string& from, const std::string& to) {
+        namespace fsns = std::filesystem;
+        std::error_code ec;
+        if (fsns::exists(to, ec))
+            fsns::copy_file(to, to + ".bak", fsns::copy_options::overwrite_existing, ec);
+        if (!copy_file_overwrite(from, to)) {
+            std::cerr << "error: cannot write " << to << "\n";
+            ok = false;
+        }
+    };
+    install(new_cve, data + "/cve_map.json");
+    install(new_probes, data + "/service_probes.json");
+    // wordlist rides along when present
+    std::string new_wl = locate_db_file(src, "wordlist.txt");
+    if (!new_wl.empty()) install(new_wl, data + "/wordlist.txt");
+
+    if (!tmp_root.empty()) fs::remove_all(tmp_root);
+    if (!ok) return 1;
+
+    std::cout << "knowledge base updated: cve_map " << new_cve_ver
+              << ", service_probes " << new_probe_ver
+              << " (backups: *.bak; data dir: " << data << ")\n";
     return 0;
 }
 
@@ -254,6 +401,7 @@ struct ShellState {
     bool version = false;
     bool interactive = false;
     int scan_exit = 0; // exit code from the scan (CI gate can make it 3)
+    int db_exit = -1;  // >= 0 when a `db` subcommand ran
 };
 
 std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
@@ -375,6 +523,27 @@ std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
         ->capture_default_str();
     app->add_flag("--list-plugins", state.ran_plugins,
                   "Load plugins from --plugins dir, report status and exit");
+
+    // Knowledge base management
+    auto db = app->add_subcommand("db", "Knowledge base management");
+    db->fallthrough();
+    auto db_status =
+        db->add_subcommand("status", "Show knowledge base versions");
+    db_status->callback(
+        [&] { state.db_exit = run_db_status(cfg, argv0); });
+    std::string db_update_path;
+    bool db_force = false;
+    auto db_update = db->add_subcommand(
+        "update", "Install a knowledge base update (directory or .tar.gz)");
+    db_update->add_option("path", db_update_path,
+                          "Directory or .tar.gz with cve_map.json, "
+                          "service_probes.json (and optional wordlist.txt)")
+        ->required();
+    db_update->add_flag("--force", db_force,
+                        "Allow version downgrades");
+    db_update->callback([&] {
+        state.db_exit = run_db_update(db_update_path, db_force, cfg, argv0);
+    });
 
     return app;
 }
@@ -597,6 +766,7 @@ int repl(const char* argv0) {
             continue;
         }
         if (state.ran_plugins) run_list_plugins(cfg, argv0);
+        if (state.db_exit >= 0) continue; // db output already printed
     }
 
     save_history(history);
@@ -638,6 +808,7 @@ int main(int argc, char** argv) {
         return 0;
     }
     if (state.ran_plugins) return run_list_plugins(cfg, argv[0]);
+    if (state.db_exit >= 0) return state.db_exit;
     if (state.ran_scan) return state.scan_exit;
     std::cout << app->help();
     return 0;

@@ -29,7 +29,7 @@ namespace {
 template <typename Stream>
 void crawl_and_assess(Stream& stream, const std::string& host, uint16_t port,
                       const ScanConfig& cfg, int timeout, const char* scheme,
-                      ResultCollector& collector) {
+                      ResultCollector& collector, bool has_session) {
     CrawlConfig cc;
     cc.max_pages = cfg.crawl_max_pages;
     cc.max_depth = cfg.crawl_depth;
@@ -56,6 +56,8 @@ void crawl_and_assess(Stream& stream, const std::string& host, uint16_t port,
     ActiveProbeConfig apc;
     apc.max_requests = cfg.crawl_max_requests;
     apc.allow_post = !cfg.safe;
+    apc.time_probes = cfg.time_probes;
+    apc.has_session = has_session;
     for (auto& f : check_crawled_app(fetch, post, crawl, host, port, apc))
         collector.add_finding(std::move(f));
 
@@ -371,7 +373,7 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
                 if (!cfg_.no_crawl)
                     crawl_and_assess(http, job.host, job.port, cfg_, timeout,
-                                     "https", collector_);
+                                     "https", collector_, !session_headers.empty());
 
                 ctx.service = "https";
                 ctx.has_http = true;
@@ -434,7 +436,7 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
             if (!cfg_.no_crawl)
                 crawl_and_assess(http, job.host, job.port, cfg_, timeout,
-                                 "http", collector_);
+                                 "http", collector_, !session_headers.empty());
 
             ctx.has_http = true;
             ctx.http_status = resp->status;

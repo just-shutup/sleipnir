@@ -1,4 +1,5 @@
 {
+  "_db_version": "2026.09",
   "openssh": {
     "product": "OpenSSH",
     "aliases": ["openssh"],
@@ -876,6 +877,72 @@
             }
           ]
         }
+      }
+    ]
+  },
+  "gitlab": {
+    "product": "GitLab",
+    "aliases": ["gitlab"],
+    "vulns": [
+      {
+        "cve": "CVE-2023-7028",
+        "affected": "<16.7.2",
+        "cvss": 10.0,
+        "summary": "Unauthenticated account takeover: the password reset flow accepts arbitrary attacker-controlled emails, granting access to accounts (including admins)"
+      }
+    ]
+  },
+  "drupal": {
+    "product": "Drupal",
+    "aliases": ["drupal"],
+    "vulns": [
+      {
+        "cve": "CVE-2018-7600",
+        "affected": "<7.59",
+        "cvss": 9.8,
+        "summary": "Drupalgeddon2: render arrays in form handling allow remote code execution without authentication"
+      },
+      {
+        "cve": "CVE-2019-6340",
+        "affected": "<8.6.10",
+        "cvss": 9.8,
+        "summary": "Remote code execution through phar:// deserialization in file handling on sites with certain module configurations"
+      }
+    ]
+  },
+  "phpmyadmin": {
+    "product": "phpMyAdmin",
+    "aliases": ["phpmyadmin"],
+    "vulns": [
+      {
+        "cve": "CVE-2018-12613",
+        "affected": ">=4.0 <4.8.2",
+        "cvss": 9.8,
+        "summary": "Local file inclusion via a crafted db parameter and path traversal in the transformation feature"
+      }
+    ]
+  },
+  "confluence": {
+    "product": "Confluence",
+    "aliases": ["confluence", "atlassian confluence"],
+    "vulns": [
+      {
+        "cve": "CVE-2023-22515",
+        "affected": ">=8.0 <8.5.2",
+        "cvss": 10.0,
+        "summary": "Broken access control on the setup endpoint allows unauthenticated attackers to re-run setup and create administrator accounts"
+      }
+    ]
+  },
+  "solr": {
+    "product": "Apache Solr",
+    "aliases": ["solr", "apache solr"],
+    "vulns": [
+      {
+        "cve": "CVE-2017-12629",
+        "affected": ">=5.5 <7.1",
+        "cvss": 9.8,
+        "summary": "Remote code execution via the RunExecutableNode in the config API and XXE in the dataimport handler"
       }
     ]
   }
