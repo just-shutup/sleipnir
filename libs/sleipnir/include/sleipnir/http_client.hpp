@@ -18,6 +18,18 @@
 
 namespace sln {
 
+// Host header value for a request: domain names pass through untouched,
+// IPv6 literals get bracketed ("[::1]:8080"), and the default ports
+// (80, 443) are omitted. Strict virtual-host configurations answer
+// 400 Bad Request to "www.example.test:443" and to unbracketed IPv6
+// authority forms, so the canonical form matters during HTTPS crawling.
+inline std::string host_header_value(const std::string& host, uint16_t port) {
+    std::string h = host;
+    if (h.find(':') != std::string::npos) h = "[" + h + "]";
+    if (port == 80 || port == 443) return h;
+    return h + ":" + std::to_string(port);
+}
+
 struct HttpResponse {
     int status = 0;
     std::string status_line;
@@ -118,8 +130,7 @@ std::optional<HttpResponse> http_request_impl(Stream& stream,
                                               const HttpOptions& opts = {}) {
     if (!stream.connect(host, port, timeout_ms)) return std::nullopt;
 
-    std::string host_header =
-        host + ((port == 80) ? "" : ":" + std::to_string(port));
+    std::string host_header = host_header_value(host, port);
     std::string ua = opts.user_agent.empty() ? user_agent : opts.user_agent;
     std::string req = method + " " + (path.empty() ? "/" : path) +
                       " HTTP/1.1\r\n"

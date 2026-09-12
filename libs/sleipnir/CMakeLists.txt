@@ -17,6 +17,8 @@ add_library(sleipnir STATIC
     src/verify.cpp
     src/auth.cpp
     src/dirb.cpp
+    src/proto_audit.cpp
+    src/default_creds.cpp
     src/engine.cpp
     src/report.cpp
 )

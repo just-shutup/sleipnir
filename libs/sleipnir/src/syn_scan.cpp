@@ -33,6 +33,46 @@ PortStatus syn_status_from_flags(uint8_t f) {
     return PortStatus::Filtered;
 }
 
+OsGuess os_guess_from_synack(int ttl, uint16_t window) {
+    OsGuess g;
+    if (ttl <= 0) return g;
+    if (ttl <= 64) {
+        g.family = "linux";
+        g.initial_ttl = 64;
+    } else if (ttl <= 128) {
+        g.family = "windows";
+        g.initial_ttl = 128;
+    } else {
+        g.family = "cisco/bsd";
+        g.initial_ttl = 255;
+    }
+    g.distance = g.initial_ttl - ttl;
+
+    // Window refinements (classic p0f signatures, light edition).
+    if (g.family == "linux") {
+        if (window == 5840 || window == 5720 || window == 14600)
+            g.detail = "Linux 2.4/2.6 (window " + std::to_string(window) + ")";
+        else
+            g.detail = "Linux (window " + std::to_string(window) + ")";
+    } else if (g.family == "windows") {
+        if (window == 8192 || window == 16384 || window == 32768)
+            g.detail = "Windows XP/2003-era (window " +
+                       std::to_string(window) + ")";
+        else if (window == 65535)
+            g.detail = "Windows 7/2008+ (window 65535)";
+        else
+            g.detail = "Windows (window " + std::to_string(window) + ")";
+    } else {
+        if (window == 4128 || window == 1024)
+            g.detail = "Cisco IOS (window " + std::to_string(window) + ")";
+        else
+            g.detail = "Cisco/BSD (window " + std::to_string(window) + ")";
+    }
+    g.detail += ", TTL " + std::to_string(ttl) + " (~" +
+                std::to_string(g.distance) + " hops)";
+    return g;
+}
+
 uint16_t ones_complement_checksum(const uint8_t* data, size_t len) {
     uint32_t sum = 0;
     size_t i = 0;
@@ -168,16 +208,18 @@ std::optional<std::vector<SynOutcome>> syn_discover(
     std::vector<SynOutcome> outcomes;
     outcomes.reserve(jobs.size());
 
-    const size_t capacity = 65535 - kSportBase + 1;
-    std::vector<uint8_t> pkt(20 + sizeof(TcpHeader));
-    uint8_t* tcpbytes = pkt.data() + 20;
+        const size_t capacity = 65535 - kSportBase + 1;
+        std::vector<uint8_t> pkt(20 + sizeof(TcpHeader));
+        uint8_t* tcpbytes = pkt.data() + 20;
 
-    for (size_t wave_start = 0; wave_start < jobs.size();
-         wave_start += capacity) {
-        const size_t wave_n = std::min(capacity, jobs.size() - wave_start);
-        std::vector<char> seen(wave_n, 0);
-        std::vector<PortStatus> st(wave_n, PortStatus::Filtered);
-        std::vector<uint32_t> seqs(wave_n);
+        for (size_t wave_start = 0; wave_start < jobs.size();
+             wave_start += capacity) {
+            const size_t wave_n = std::min(capacity, jobs.size() - wave_start);
+            std::vector<char> seen(wave_n, 0);
+            std::vector<PortStatus> st(wave_n, PortStatus::Filtered);
+            std::vector<uint32_t> seqs(wave_n);
+            std::vector<int> reply_ttl(wave_n, 0);
+            std::vector<uint16_t> reply_window(wave_n, 0);
 
         for (size_t i = 0; i < wave_n; ++i) {
             const auto& job = jobs[wave_start + i];
@@ -272,6 +314,12 @@ std::optional<std::vector<SynOutcome>> syn_discover(
             uint8_t flags = tcp[13];
             if (flags & kTcpSyn) {
                 if (ack != expect) continue; // not a reply to our SYN
+                // OS fingerprint inputs from the SYN-ACK: IP TTL and the
+                // TCP window (only SYN|ACK replies carry usable values).
+                reply_ttl[slot] = buf[8];
+                uint16_t win;
+                std::memcpy(&win, tcp + 14, 2);
+                reply_window[slot] = ntohs(win);
             } else if (flags & kTcpRst) {
                 if (ack != expect && ack != 0) continue;
             } else {
@@ -285,7 +333,10 @@ std::optional<std::vector<SynOutcome>> syn_discover(
             const auto& job = jobs[wave_start + i];
             outcomes.push_back(
                 {hosts[job.host], job.port,
-                 seen[i] ? st[i] : PortStatus::Filtered});
+                 seen[i] ? st[i] : PortStatus::Filtered,
+                 (seen[i] && st[i] == PortStatus::Open) ? reply_ttl[i] : 0,
+                 (seen[i] && st[i] == PortStatus::Open) ? reply_window[i]
+                                                       : 0});
             collector.debug("[syn] " + hosts[job.host] + ":" +
                             std::to_string(job.port) + " " +
                             status_name(outcomes.back().status));

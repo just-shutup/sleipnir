@@ -56,16 +56,26 @@ Every listener emulates a real service badly enough to trip the scanner:
                              (negative stand)
   127.0.0.1:8092  BIG-IP     BigIP 13.1.0, TMUI fileRead traversal open
                              -> CVE-2020-5902 CONFIRMED
-  127.0.0.1:8093  BIG-IP-hardened  same 13.1.0 with the TMUI hotfix
-                             -> CVE-2020-5902 stays "potential"
-                             (negative stand)
-  127.0.0.1:8094  Jenkins    2.426, CLI argument expansion over chunked
-                             POST reads /etc/passwd
-                             -> CVE-2024-23897 CONFIRMED via check script
-  127.0.0.1:8095  Jenkins-hardened  same 2.426 with the CLI fixed
-                             -> CVE-2024-23897 stays "potential"
-                             (negative stand)
-  127.0.0.1:2375  Docker     Docker Engine API without TLS/auth (root-equivalent)
+   127.0.0.1:8093  BIG-IP-hardened  same 13.1.0 with the TMUI hotfix
+                              -> CVE-2020-5902 stays "potential"
+                              (negative stand)
+   127.0.0.1:8094  Jenkins    2.426, CLI argument expansion over chunked
+                              POST reads /etc/passwd
+                              -> CVE-2024-23897 CONFIRMED via check script
+   127.0.0.1:8095  Jenkins-hardened  same 2.426 with the CLI fixed
+                              -> CVE-2024-23897 stays "potential"
+                              (negative stand)
+   127.0.0.1:2375  Docker     Docker Engine API without TLS/auth (root-equivalent)
+   127.0.0.1:2202  SSH-weak   MockSSH_Weak1.0 advertises weak kex/ciphers
+                              (dh-group1-sha1, 3des-cbc, arcfour)
+                              -> SSH audit module flags weak algorithms
+   127.0.0.1:2203  SSH-strong  MockSSH_Strong1.0 with only modern algorithms
+                              -> SSH audit module finds no weak algorithms
+                              (negative stand)
+   127.0.0.1:6382  redis-pw    Redis 6.0.16 with requirepass (default creds)
+                              -> default-creds check against password-protected instance
+   127.0.0.1:3307  mysql-def  MySQL 5.7.33-log accepting root/root
+                              -> default-creds check for MySQL
   127.0.0.1:2501  SMTP       Postfix banner, accepts any RCPT (open relay),
                              VRFY confirms mailboxes (enumeration)
   127.0.0.1:2502  SMTP       Postfix banner, relay closed, VRFY disabled
@@ -80,9 +90,12 @@ Every listener emulates a real service badly enough to trip the scanner:
 
 Usage:  python3 tools/mocklab/mock_services.py
 Then:   ./build/apps/sleipnir/sleipnir scan 127.0.0.1 \
-            -p 2101,2102,2201,2375,2501,2502,2503,6380,6381,8080-8095,8443
+            -p 2101,2102,2201,2202,2203,2375,2501,2502,2503,3307,6380,6381,6382,8080-8095,8443
         ./build/apps/sleipnir/sleipnir scan 127.0.0.1 -p 1900 --udp \
             --udp-ports 1900,5353,11211,161
+        ./build/apps/sleipnir/sleipnir scan 127.0.0.1 -p 2202,2203 --ssh-audit
+        ./build/apps/sleipnir/sleipnir scan 127.0.0.1 -p 3307,6382 \
+            --brute-default-creds
 """
 
 import html
@@ -1301,10 +1314,169 @@ class UdpLabServer(socketserver.UDPServer):
     allow_reuse_address = True
 
 
+class RedisPasswordHandler(RedisLabHandler):
+    """Redis 6.0.16 with a password configured (requirepass). On connect
+    the server sends '-NOAUTH Authentication required.' for commands that are
+    not AUTH, letting the default-creds check exercise password attempts."""
+
+    def handle(self):
+        try:
+            self.request.settimeout(2)
+            while True:
+                data = self.request.recv(4096)
+                if not data:
+                    break
+                cmd = data.split(b"\r\n")[0].strip().upper()
+                if cmd.startswith(b"AUTH"):
+                    parts = data.split(b"\r\n")
+                    pw = parts[2].strip() if len(parts) > 2 else b""
+                    if pw == b"redis":
+                        self.request.sendall(b"+OK\r\n")
+                    else:
+                        self.request.sendall(b"-ERR invalid password\r\n")
+                else:
+                    self.request.sendall(b"-NOAUTH Authentication required.\r\n")
+        except OSError:
+            pass
+
+
+class SshWeakCipherHandler(socketserver.StreamRequestHandler):
+    """SSH-2.0 server that advertises weak algorithms in its KEXINIT
+    packet so the SSH audit module flags them: weak kex, weak ciphers,
+    and auth-method enumeration works."""
+
+    def handle(self):
+        try:
+            self.request.settimeout(5)
+            # Send identification string
+            self.request.sendall(b"SSH-2.0-SleipnirMockSSH_Weak1.0\r\n")
+            # Read client's KEXINIT
+            data = self.request.recv(4096)
+            if not data:
+                return
+            # Send KEXINIT with weak algorithms
+            import struct
+            cookie = b"\x00" * 16
+            kex = b"diffie-hellman-group1-sha1"
+            hostkey = b"ssh-rsa"
+            ciphers = b"3des-cbc,arcfour"
+            payload = (
+                struct.pack(">I", 0) + cookie +
+                struct.pack(">I", len(kex)) + kex +
+                struct.pack(">I", len(hostkey)) + hostkey +
+                struct.pack(">I", len(ciphers)) + ciphers +
+                struct.pack(">I", len(ciphers)) + ciphers +
+                struct.pack(">I", 8) + b"hmac-sha1" +
+                struct.pack(">I", 5) + b"none" +
+                struct.pack(">I", 0) + b"" +
+                b"\x00" + struct.pack(">I", 0)
+            )
+            msg = bytes([20]) + struct.pack(">I", len(payload) + 32) + payload
+            # Actually message type 20 = KEXINIT
+            full = b"\x14" + struct.pack(">I", len(payload) + 32) + b"\x00" * 16 + payload
+            self.request.sendall(full)
+            time.sleep(0.3)
+            # Keep connection open for auth-method enum
+            while True:
+                data = self.request.recv(4096)
+                if not data:
+                    break
+                # Send USERAUTH_FAILURE to enumerate methods
+                methods = b"publickey,password,keyboard-interactive"
+                resp = (
+                    b"\x00" +
+                    bytes([51]) +  # SSH_MSG_USERAUTH_FAILURE
+                    bytes([len(methods)]) +
+                    methods +
+                    b"\x00"
+                )
+                self.request.sendall(resp)
+        except OSError:
+            pass
+
+
+class SshHardenedHandler(SshWeakCipherHandler):
+    """SSH server that advertises only strong algorithms (negative stand)"""
+
+    def handle(self):
+        try:
+            self.request.settimeout(5)
+            self.request.sendall(b"SSH-2.0-SleipnirMockSSH_Strong1.0\r\n")
+            data = self.request.recv(4096)
+            if not data:
+                return
+            import struct
+            cookie = b"\x00" * 16
+            kex = b"curve25519-sha256,ecdh-sha2-nistp256"
+            hostkey = b"ssh-ed25519,rsa-sha2-256"
+            ciphers = b"chacha20-poly1305@openssh.com,aes256-gcm@openssh.com"
+            payload = (
+                struct.pack(">I", 0) + cookie +
+                struct.pack(">I", len(kex)) + kex +
+                struct.pack(">I", len(hostkey)) + hostkey +
+                struct.pack(">I", len(ciphers)) + ciphers +
+                struct.pack(">I", len(ciphers)) + ciphers +
+                struct.pack(">I", 8) + b"hmac-sha1" +
+                struct.pack(">I", 5) + b"none" +
+                struct.pack(">I", 0) + b"" +
+                b"\x00" + struct.pack(">I", 0)
+            )
+            full = b"\x14" + struct.pack(">I", len(payload) + 32) + b"\x00" * 16 + payload
+            self.request.sendall(full)
+            time.sleep(0.3)
+            while True:
+                data = self.request.recv(4096)
+                if not data:
+                    break
+        except OSError:
+            pass
+
+
+class MysqlDefaultCredsHandler(socketserver.StreamRequestHandler):
+    """MySQL mock that allows root login with common default passwords."""
+
+    DEFAULT_CREDS = {
+        b"root": [b"root", b"", b"mysql", b"password", b"toor"],
+    }
+
+    def handle(self):
+        try:
+            self.request.settimeout(5)
+            # Send handshake packet
+            import struct
+            salt = b"12345678"  # 8 bytes salt
+            handshake = bytearray()
+            handshake.append(0)  # protocol version
+            handshake.extend(b"5.7.33-log\x00")  # server version
+            handshake.extend(struct.pack("<I", 1))  # thread id
+            handshake.extend(salt + b"\x00")
+            handshake.extend(b"\x00\x00\x00\x00")  # scramblebles1 scramblebles
+            self.request.sendall(bytes(handshake))
+            # Read auth response
+            data = self.request.recv(4096)
+            if len(data) < 40:
+                return
+            # Parse username from auth response (simplified)
+            if b"root" in data:
+                for pw in self.DEFAULT_CREDS.get(b"root", []):
+                    if pw in data:
+                        # Auth success
+                        ok = struct.pack("<I", 1) + b"\x00"
+                        self.request.sendall(ok)
+                        return
+            # Auth failed
+            err = struct.pack("<I", 1045) + b"Access denied for user 'root'@'localhost'"
+            self.request.sendall(err)
+        except OSError:
+            pass
+
+
 # ---------------------------------------------------------------------------
 
 SERVICES = [
     ("ssh", 2201, SshHandler),
+    ("ssh-weak", 2202, SshWeakCipherHandler),
+    ("ssh-strong", 2203, SshHardenedHandler),
     ("ftp-vuln", 2101, FtpHandler),
     ("ftp-anon", 2102, FtpAnonHandler),
     ("http", 8080, LabHTTPRequestHandler, LabHTTPServer),
@@ -1314,6 +1486,7 @@ SERVICES = [
     ("crashy-echo", 2503, EchoCrashHandler, CrashyTCPServer),
     ("redis", 6380, RedisLabHandler),
     ("redis-hard", 6381, RedisHardenedHandler),
+    ("redis-pw", 6382, RedisPasswordHandler),
     ("docker-api", 2375, DockerApiHandler, LabHTTPServer),
     ("wordpress", 8081, WordPressHandler, LabHTTPServer),
     ("spa", 8082, SpaHandler, LabHTTPServer),
@@ -1334,6 +1507,7 @@ SERVICES = [
     ("jenkins-vuln", 8094, JenkinsHandler, LabHTTPServer),
     ("jenkins-hardened", 8095, JenkinsHardenedHandler, LabHTTPServer),
     ("authapp", 8096, AuthAppHandler, LabHTTPServer),
+    ("mysql-defaults", 3307, MysqlDefaultCredsHandler),
 ]
 
 class Ipv6TcpServer(socketserver.ThreadingTCPServer):

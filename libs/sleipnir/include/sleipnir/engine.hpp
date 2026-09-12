@@ -10,8 +10,10 @@
 #include "sleipnir/plugins.hpp"
 #include "sleipnir/probes.hpp"
 #include "sleipnir/results.hpp"
+#include "sleipnir/syn_scan.hpp"
 #include "sleipnir/types.hpp"
 
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -65,6 +67,9 @@ private:
     ResultCollector collector_;
     JobQueue<Job> queue_;
     std::set<uint16_t> tls_ports_;
+    // Passive OS guess per host from the SYN phase (TTL + window of the
+    // first SYN-ACK); populated before the worker pool starts.
+    std::map<std::string, OsGuess> host_os_;
     std::atomic<uint64_t> active_workers_{0};
     std::atomic<int> adaptive_delay_ms_{0}; // runtime backoff, ms
     int base_delay_ms_ = 0;                 // timing profile delay

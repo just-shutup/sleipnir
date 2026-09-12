@@ -4,6 +4,7 @@
 #include "sleipnir/dirb.hpp"
 #include "sleipnir/fuzz.hpp"
 #include "sleipnir/netio.hpp"
+#include "sleipnir/proto_audit.hpp"
 #include "sleipnir/syn_scan.hpp"
 #include "sleipnir/targets.hpp"
 #include "sleipnir/udp_scan.hpp"
@@ -231,6 +232,13 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
     result.port = job.port;
     result.status = PortStatus::Open;
 
+    // Passive OS guess from the SYN phase (host-level, best effort).
+    std::string os_family;
+    if (auto it = host_os_.find(job.host); it != host_os_.end()) {
+        os_family = it->second.family;
+        result.os_guess = it->second.detail;
+    }
+
     // 1. fingerprint via probes (banner grabbing + active probes)
     auto reconnect = [&client, &job, timeout] {
         return client.connect(job.host, job.port, timeout);
@@ -256,13 +264,43 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                                          result.version) +
                               ")"));
 
-    // 2. CVE matching from the identified product/version. Findings with an
-    // active check are buffered until we know whether an HTTP transport can
-    // verify them; everything else is re-added below.
+    // 2. CVE matching from the identified product/version. The raw banner
+    // feeds the distro-backport marker ("Apache/2.4.10 (Debian)"), the
+    // passive OS guess gates platform-specific products. Findings with
+    // an active check are buffered until we know whether an HTTP
+    // transport can verify them; everything else is re-added below.
     std::vector<Finding> pending_cve;
     if (!result.product.empty()) {
         pending_cve = cves_.match(job.host, job.port, result.product,
-                                  result.version);
+                                  result.version, result.banner, os_family);
+    }
+
+    // 2.5 Protocol audits (fresh connections; --safe keeps them passive).
+    // SSH: weak algorithms from KEXINIT + auth-method enumeration via a
+    // real key exchange and a single "none" USERAUTH_REQUEST.
+    if (result.service == "ssh") {
+        SshAlgorithms algs =
+            ssh_audit(io, job.host, job.port, timeout, true, collector_);
+        for (auto& f : ssh_audit_findings(job.host, job.port, algs))
+            collector_.add_finding(std::move(f));
+    }
+    // SMB: dialect/signing policy; null/guest sessions + share
+    // enumeration need actual logons, so --safe gets the passive part.
+    if (job.port == 445 || job.port == 139) {
+        SmbInfo info = smb_audit(io, job.host, job.port, timeout, !cfg_.safe,
+                                 collector_);
+        for (auto& f : smb_audit_findings(job.host, job.port, info))
+            collector_.add_finding(std::move(f));
+    }
+    // Default credentials (opt-in): FTP/MySQL/Redis logins with the
+    // built-in factory-default dictionary.
+    if (cfg_.brute_default_creds &&
+        (result.service == "ftp" || result.service == "mysql" ||
+         result.service == "redis")) {
+        for (auto& f : default_creds_audit(io, result.service, result.banner,
+                                           job.host, job.port, timeout,
+                                           collector_))
+            collector_.add_finding(std::move(f));
     }
 
     // Cleartext credential exposure: telnet carries logins unencrypted.
@@ -354,9 +392,12 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
                 auto root = check_root_response(job.host, job.port, *resp);
                 for (auto& f : root.findings) collector_.add_finding(std::move(f));
+                std::string server_banner;
+                if (auto sv = resp->header("server")) server_banner = *sv;
                 for (const auto& [product, version] : root.tech_stack) {
                     for (auto& f : cves_.match(job.host, job.port, product,
-                                               version))
+                                               version, server_banner,
+                                               os_family))
                         pending_cve.push_back(std::move(f));
                 }
 
@@ -370,6 +411,14 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                 for (auto& f : check_http_methods(http, job.host, job.port,
                                                   timeout, cfg_.user_agent))
                     collector_.add_finding(std::move(f));
+                if (cfg_.brute_default_creds && resp->status == 401) {
+                    auto www = resp->header("www-authenticate");
+                    if (www && www->find("asic") != std::string::npos)
+                        for (auto& f : default_creds_http_basic(
+                                 http, job.host, job.port, timeout,
+                                 cfg_.user_agent))
+                            collector_.add_finding(std::move(f));
+                }
 
                 if (!cfg_.no_crawl)
                     crawl_and_assess(http, job.host, job.port, cfg_, timeout,
@@ -415,9 +464,12 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
 
             auto root = check_root_response(job.host, job.port, *resp);
             for (auto& f : root.findings) collector_.add_finding(std::move(f));
+            std::string server_banner;
+            if (auto sv = resp->header("server")) server_banner = *sv;
             for (const auto& [product, version] : root.tech_stack) {
                 for (auto& f :
-                     cves_.match(job.host, job.port, product, version))
+                     cves_.match(job.host, job.port, product, version,
+                                 server_banner, os_family))
                     pending_cve.push_back(std::move(f));
             }
 
@@ -433,6 +485,14 @@ int ScanEngine::process_job(const Job& job, TcpClient& client,
                  check_http_methods(http, job.host, job.port, timeout,
                                     cfg_.user_agent))
                 collector_.add_finding(std::move(f));
+            if (cfg_.brute_default_creds && resp->status == 401) {
+                auto www = resp->header("www-authenticate");
+                if (www && www->find("asic") != std::string::npos)
+                    for (auto& f : default_creds_http_basic(
+                             http, job.host, job.port, timeout,
+                             cfg_.user_agent))
+                        collector_.add_finding(std::move(f));
+            }
 
             if (!cfg_.no_crawl)
                 crawl_and_assess(http, job.host, job.port, cfg_, timeout,
@@ -513,6 +573,7 @@ std::vector<PortResult> ScanEngine::run(const std::vector<std::string>& hosts,
     // fingerprinting pipeline, closed/filtered ones are only counted.
     std::vector<Job> tcp_jobs;
     bool syn_used = false;
+    host_os_.clear();
     if (cfg_.syn_scan) {
         auto outcomes = syn_discover(hosts, ports, cfg_.timeout_ms,
                                      cfg_.delay_ms, collector_);
@@ -524,6 +585,16 @@ std::vector<PortResult> ScanEngine::run(const std::vector<std::string>& hosts,
                 if (o.status == PortStatus::Open) {
                     tcp_jobs.push_back({o.host, o.port});
                     ++open_count;
+                    // Passive OS fingerprint from the first SYN-ACK of a
+                    // host: initial TTL + TCP window (p0f-style).
+                    if (o.ttl > 0 && !host_os_.count(o.host)) {
+                        OsGuess g = os_guess_from_synack(o.ttl, o.window);
+                        if (!g.family.empty()) {
+                            host_os_[o.host] = g;
+                            collector_.log("  [os] " + o.host + ": " +
+                                           g.detail + " -> " + g.family);
+                        }
+                    }
                 } else if (cfg_.verbose) {
                     PortResult row;
                     row.host = o.host;

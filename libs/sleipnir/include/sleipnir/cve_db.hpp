@@ -25,6 +25,7 @@ struct VulnEntry {
 struct ProductEntry {
     std::string product;                 // canonical, e.g. "OpenSSH"
     std::vector<std::string> aliases;    // banner spellings, lowercase
+    std::string os;                      // "linux" | "windows" | "" (any)
     std::vector<VulnEntry> vulns;
 };
 
@@ -35,9 +36,23 @@ public:
 
     // Match product/version against the DB; product lookup is
     // case-insensitive and alias-aware ("openssh_8.4p1" still hits OpenSSH).
+    //
+    // banner: the raw banner/Server-header the version came from. When it
+    // names a distro ("Apache/2.4.10 (Debian)",
+    // "SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.8"), version-only findings
+    // carry a "[Debian Backport likely]"-style marker and their confidence
+    // is lowered to "low": distro packages keep the upstream version string
+    // while shipping the fix, which is the main source of false positives
+    // on such servers.
+    //
+    // os_family: the SYN-scan OS guess ("linux"/"windows"/"cisco/bsd").
+    // Products whose "os" tag conflicts with the observed family are
+    // skipped entirely — no Debian-CVEs on a Windows host.
     std::vector<Finding> match(const std::string& host, uint16_t port,
                                const std::string& product,
-                               const std::string& version) const;
+                               const std::string& version,
+                               const std::string& banner = "",
+                               const std::string& os_family = "") const;
 
     size_t product_count() const { return products_.size(); }
 
@@ -50,5 +65,9 @@ private:
     std::vector<ProductEntry> products_;
     std::string db_version_;
 };
+
+// True when the raw banner names a Linux distribution that backports
+// security fixes while keeping the upstream version string.
+std::string distro_backport_marker(const std::string& banner);
 
 } // namespace sln

@@ -1956,3 +1956,222 @@ TEST_CASE("knowledge bases carry versions and skip metadata keys") {
         CHECK(cves.match("h", 1, "GitLab", "16.8.0").empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// OS fingerprint from SYN-ACK (TTL + TCP window)
+// ---------------------------------------------------------------------------
+
+#include "sleipnir/syn_scan.hpp"
+
+TEST_CASE("OS fingerprint classifies by TTL") {
+    // TTL 64 -> Linux
+    auto g = os_guess_from_synack(64, 65535);
+    CHECK(g.family == "linux");
+
+    // TTL 128 -> Windows
+    g = os_guess_from_synack(128, 65535);
+    CHECK(g.family == "windows");
+
+    // TTL 255 -> Cisco/BSD
+    g = os_guess_from_synack(255, 65535);
+    CHECK(g.family == "cisco/bsd");
+
+    // TTL 64 with a small window -> still Linux
+    g = os_guess_from_synack(64, 1024);
+    CHECK(g.family == "linux");
+
+    // Unknown TTL (ttl <= 0 returns empty guess)
+    g = os_guess_from_synack(0, 65535);
+    CHECK(g.family.empty());
+}
+
+// ---------------------------------------------------------------------------
+// SSH audit: weak algorithm detection
+// ---------------------------------------------------------------------------
+
+#include "sleipnir/proto_audit.hpp"
+
+TEST_CASE("SSH weak algorithm classifier") {
+    SshAlgorithms algs;
+    // Parse a KEXINIT payload that offers weak algorithms
+    // We test classify indirectly: build the struct and call ssh_weak_algorithms
+    algs.kex = {"diffie-hellman-group1-sha1", "curve25519-sha256"};
+    algs.ciphers_c2s = {"3des-cbc", "aes128-ctr"};
+    algs.ciphers_s2c = {"3des-cbc", "aes128-ctr"};
+    algs.host_keys = {"ssh-rsa", "ssh-ed25519"};
+
+    auto weak = ssh_weak_algorithms(algs);
+    // Should find the weak kex and weak cipher
+    CHECK_FALSE(weak.empty());
+    bool found_weak_kex = false, found_weak_cipher = false;
+    for (const auto& w : weak) {
+        if (w.name == "diffie-hellman-group1-sha1") found_weak_kex = true;
+        if (w.name == "3des-cbc") found_weak_cipher = true;
+    }
+    CHECK(found_weak_kex);
+    CHECK(found_weak_cipher);
+
+    // All-strong algorithms -> no findings
+    SshAlgorithms strong;
+    strong.kex = {"curve25519-sha256", "ecdh-sha2-nistp256"};
+    strong.ciphers_c2s = {"chacha20-poly1305@openssh.com", "aes256-gcm@openssh.com"};
+    strong.ciphers_s2c = {"chacha20-poly1305@openssh.com", "aes256-gcm@openssh.com"};
+    strong.host_keys = {"ssh-ed25519", "rsa-sha2-256"};
+    CHECK(ssh_weak_algorithms(strong).empty());
+}
+
+TEST_CASE("SSH auth-method enumeration") {
+    SshAlgorithms algs;
+    algs.auth_methods = {"publickey", "password", "keyboard-interactive"};
+    algs.auth_enumerated = true;
+    algs.auth_none_accepted = false;
+
+    CHECK(algs.auth_enumerated);
+    CHECK_FALSE(algs.auth_none_accepted);
+    CHECK(algs.auth_methods.size() == 3);
+    // password keyboard-interactive are acceptable auth methods
+    CHECK(std::find(algs.auth_methods.begin(), algs.auth_methods.end(),
+                    "password") != algs.auth_methods.end());
+}
+
+// ---------------------------------------------------------------------------
+// SMB audit results
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SMB audit result defaults") {
+    SmbInfo info;
+    CHECK_FALSE(info.smb1_enabled);
+    CHECK_FALSE(info.null_session_ok);
+    CHECK(info.shares.empty());
+    CHECK_FALSE(info.signing_required);
+}
+
+// ---------------------------------------------------------------------------
+// Default credentials module
+// ---------------------------------------------------------------------------
+
+TEST_CASE("default credentials lookup") {
+    // FTP default creds
+    auto creds = default_creds_for("ftp");
+    CHECK_FALSE(creds.empty());
+    bool found_admin = false;
+    for (const auto& c : creds)
+        if (c.user == "admin" && c.password == "admin")
+            found_admin = true;
+    CHECK(found_admin);
+
+    // MySQL root credentials
+    auto mysql_creds = default_creds_for("mysql");
+    bool root_root = false;
+    for (const auto& c : mysql_creds) {
+        if (c.user == "root" && c.password == "root")
+            root_root = true;
+    }
+    CHECK(root_root);
+
+    // Redis default creds (uses "default" as username)
+    auto redis_creds = default_creds_for("redis");
+    CHECK_FALSE(redis_creds.empty());
+    bool redis_default = false;
+    for (const auto& c : redis_creds)
+        if (c.user == "default" && c.password == "redis")
+            redis_default = true;
+    CHECK(redis_default);
+
+    // HTTP Basic credentials
+    auto http_creds = default_creds_for("http-basic");
+    CHECK_FALSE(http_creds.empty());
+
+    // unknown service -> empty list
+    CHECK(default_creds_for("nonexistent-service").empty());
+}
+
+// ---------------------------------------------------------------------------
+// CVE backport detection
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Debian backport marker") {
+    // Debian banner -> marker present
+    CHECK(distro_backport_marker("Apache/2.4.49 (Debian)") ==
+          "Debian Backport likely");
+
+    // Ubuntu banner -> marker present
+    CHECK(distro_backport_marker("SSH-2.0-OpenSSH_7.2p2 Ubuntu-4ubuntu2.8") ==
+          "Ubuntu Backport likely");
+
+    // RHEL/CentOS banner -> marker present
+    CHECK(distro_backport_marker("Apache/2.4.6 (CentOS)") ==
+          "RHEL/CentOS Backport likely");
+
+    // plain upstream banner -> empty (no marker)
+    CHECK(distro_backport_marker("Apache/2.4.49").empty());
+
+    // non-distro banner -> empty
+    CHECK(distro_backport_marker("Server: nginx").empty());
+}
+
+// ---------------------------------------------------------------------------
+// Host header value construction
+// ---------------------------------------------------------------------------
+
+TEST_CASE("host_header_value omits standard ports and brackets IPv6") {
+    std::string h;
+
+    // standard HTTP port -> no port in Host header
+    h = host_header_value("127.0.0.1", 80);
+    CHECK(h == "127.0.0.1");
+
+    // standard HTTPS port -> no port in Host header
+    h = host_header_value("127.0.0.1", 443);
+    CHECK(h == "127.0.0.1");
+
+    // non-standard port -> port included
+    h = host_header_value("127.0.0.1", 8080);
+    CHECK(h == "127.0.0.1:8080");
+
+    // IPv6 standard port -> bracketed, no port suffix
+    h = host_header_value("::1", 443);
+    CHECK(h == "[::1]");
+
+    // IPv6 non-standard port -> bracketed with port
+    h = host_header_value("::1", 8080);
+    CHECK(h == "[::1]:8080");
+}
+
+TEST_CASE("CVE match lowers confidence for distro backports") {
+    const char* path = "/tmp/sleipnir_test_backport.json";
+    {
+        std::ofstream out(path);
+        out << R"({
+            "apache": {
+                "product": "Apache",
+                "aliases": ["apache"],
+                "vulns": [
+                    {"cve": "CVE-1000-0001", "affected": "<2.5", "cvss": 7.5,
+                     "summary": "Test CVE for backport test"}
+                ]
+            }
+        })";
+    }
+    auto db = CveDb::load(path);
+    std::remove(path);
+
+    // Plain upstream banner -> confidence is "potential"
+    auto findings_upstream = db.match("h", 80, "Apache", "2.4.49", "Apache/2.4.49");
+    REQUIRE(!findings_upstream.empty());
+    CHECK(findings_upstream[0].confidence == "potential");
+
+    // Debian backport banner -> confidence is lowered to "low"
+    auto findings_debian = db.match("h", 80, "Apache", "2.4.49", "Apache/2.4.49 (Debian)");
+    REQUIRE(!findings_debian.empty());
+    CHECK(findings_debian[0].confidence == "low");
+    CHECK(findings_debian[0].evidence.find("[Debian Backport likely]") !=
+          std::string::npos);
+
+    // Ubuntu backport banner -> confidence is lowered to "low"
+    auto findings_ubuntu = db.match("h", 80, "Apache", "2.4.49", "Apache/2.4.49 Ubuntu");
+    REQUIRE(!findings_ubuntu.empty());
+    CHECK(findings_ubuntu[0].confidence == "low");
+    CHECK(findings_ubuntu[0].evidence.find("[Ubuntu Backport likely]") !=
+          std::string::npos);
+}

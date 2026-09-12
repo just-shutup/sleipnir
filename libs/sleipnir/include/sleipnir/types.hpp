@@ -64,6 +64,7 @@ struct PortResult {
     std::string product;   // "OpenSSH", "Apache", ...
     std::string version;   // "8.4p1"
     std::string banner;    // raw bytes collected from the service
+    std::string os_guess;  // SYN-scan passive OS guess ("" = none)
     int http_status = 0;   // 0 if not HTTP
     std::map<std::string, std::string> http_headers; // keys lowercased
     std::optional<TlsInfo> tls; // present for endpoints inspected over TLS
@@ -117,6 +118,12 @@ struct Finding {
     std::string confidence;
     // Active check to run against the endpoint, when the CVE record has one.
     std::shared_ptr<const VulnCheck> check;
+    // OS-family context for backport detection (empty = unknown).
+    std::string os_family;
+    // Version disclosed in the banner (for Debian/Ubuntu package detection).
+    std::string version_disclosed;
+    // Product name from the banner.
+    std::string product;
 };
 
 // Authenticated scanning (--auth FILE): how to obtain a session and which
@@ -197,6 +204,11 @@ struct ScanConfig {
     // Delay-based parametric probes (time-based SQLi, blind command
     // injection): opt-in because every probe costs seconds of wall clock.
     bool time_probes = false;
+
+    // Factory-default credential attempts on FTP/MySQL/Redis/HTTP-Basic
+    // (--brute-default-creds): opt-in because login attempts can trip
+    // account lockouts; disabled in --safe mode.
+    bool brute_default_creds = false;
 
     // CI gate (--fail-on SEVERITY): empty -> disabled.
     std::string fail_on;

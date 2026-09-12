@@ -146,6 +146,11 @@ int run_scan(sln::ScanConfig& cfg, const char* argv0) {    if (cfg.targets.empty
                      "overrides --time-probes)\n";
         cfg.time_probes = false;
     }
+    if (cfg.safe && cfg.brute_default_creds) {
+        std::cout << "[safe mode] default-credential attempts disabled "
+                     "(--safe overrides --brute-default-creds)\n";
+        cfg.brute_default_creds = false;
+    }
 
     // Authenticated scanning: validate the config before touching targets.
     if (!cfg.auth_file.empty()) {
@@ -507,6 +512,12 @@ std::unique_ptr<CLI::App> build_app(sln::ScanConfig& cfg, ShellState& state,
                    "Enable time-based SQLi and blind command-injection "
                    "probes (each costs seconds; never in --safe)");
 
+    // Default credential attempts
+    scan->add_flag("--brute-default-creds", cfg.brute_default_creds,
+                   "Try factory default credentials on FTP/MySQL/Redis and "
+                   "HTTP Basic endpoints (opt-in: lockout risk; never in "
+                   "--safe)");
+
     // CI gate
     scan->add_option("--fail-on", cfg.fail_on,
                      "Exit with code 3 when findings reach SEVERITY "
@@ -623,6 +634,8 @@ void show_settings(const sln::ScanConfig& cfg) {
               << (cfg.wordlist_path.empty() ? "" : " (" + cfg.wordlist_path + ")")
               << "\n"
               << "time_probes    : " << (cfg.time_probes ? "on" : "off") << "\n"
+              << "default_creds : "
+              << (cfg.brute_default_creds ? "on" : "off") << "\n"
               << "plugins        : "
               << (cfg.disable_plugins ? "disabled" : cfg.plugins_dir) << "\n"
               << "data_dir       : " << cfg.data_dir << "\n"

@@ -36,7 +36,24 @@ struct SynOutcome {
     std::string host;
     uint16_t port;
     PortStatus status;
+    int ttl = 0;           // IP TTL of the SYN-ACK reply (0 = unknown)
+    uint16_t window = 0;   // TCP window of the SYN-ACK reply (0 = unknown)
 };
+
+// Passive/light OS classification (p0f-style) from the initial TTL and the
+// TCP window of a SYN-ACK. Initial TTL stacks: 64 = Linux, 128 = Windows,
+// 255 = Cisco/BSD; the received TTL minus the initial one estimates the hop
+// count. The window refines the family guess. Cheap by construction: both
+// values ride along with every SYN-ACK the scanner already processes.
+struct OsGuess {
+    std::string family;   // "linux" | "windows" | "cisco/bsd" | "" (unknown)
+    std::string detail;   // human-readable summary for logs and reports
+    int initial_ttl = 0;  // estimated initial TTL (64/128/255)
+    int distance = 0;     // estimated hop count
+};
+
+// Pure classifier: ttl <= 0 returns an empty (unknown) guess.
+OsGuess os_guess_from_synack(int ttl, uint16_t window);
 
 // IPv4 SYN discovery for every (host, port). Hostnames are resolved to IPv4
 // first; if any target has no IPv4 address (IPv6-only) raw-socket scanning

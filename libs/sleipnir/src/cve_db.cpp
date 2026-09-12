@@ -125,7 +125,22 @@ VulnEntry parse_vuln(const json& j) {
     return e;
 }
 
-} // namespace
+}
+
+// True when the raw banner names a Linux distribution that backports
+// security fixes while keeping the upstream version string — the classic
+// false-positive amplifier for version-based CVE matching.
+std::string distro_backport_marker(const std::string& banner) {
+    std::string low = lower(banner);
+    if (low.find("debian") != std::string::npos) return "Debian Backport likely";
+    if (low.find("ubuntu") != std::string::npos) return "Ubuntu Backport likely";
+    if (low.find("raspbian") != std::string::npos) return "Raspbian Backport likely";
+    if (low.find("centos") != std::string::npos ||
+        low.find("rhel") != std::string::npos ||
+        low.find("red hat") != std::string::npos)
+        return "RHEL/CentOS Backport likely";
+    return "";
+}
 
 CveDb CveDb::load(const std::string& path) {
     std::ifstream in(path);
@@ -149,6 +164,7 @@ CveDb CveDb::load(const std::string& path) {
         p.aliases.push_back(lower(key));
         if (value.contains("aliases"))
             for (const auto& a : value["aliases"]) p.aliases.push_back(lower(a.get<std::string>()));
+        p.os = lower(value.value("os", ""));
         if (value.contains("vulns"))
             for (const auto& v : value["vulns"]) p.vulns.push_back(parse_vuln(v));
         if (!p.vulns.empty()) db.products_.push_back(std::move(p));
@@ -160,7 +176,9 @@ CveDb CveDb::load(const std::string& path) {
 
 std::vector<Finding> CveDb::match(const std::string& host, uint16_t port,
                                   const std::string& product,
-                                  const std::string& version) const {
+                                  const std::string& version,
+                                  const std::string& banner,
+                                  const std::string& os_family) const {
     std::vector<Finding> out;
     if (product.empty()) return out;
 
@@ -173,6 +191,16 @@ std::vector<Finding> CveDb::match(const std::string& host, uint16_t port,
                 break;
             }
         if (!alias_hit) continue;
+
+        // OS gate: when the SYN-scan fingerprint says "windows" and the
+        // product only exists on Linux (vsftpd, ...), the banner was a lie
+        // or the guess is wrong — either way the CVE does not apply.
+        if (!p.os.empty() && !os_family.empty() && p.os != os_family) continue;
+
+        // Distro backport marker from the raw banner ("Apache/2.4.10
+        // (Debian)"): distro packages keep the upstream version while
+        // carrying the fix, so version matches stay potential suspicions.
+        const std::string backport = distro_backport_marker(banner);
 
         for (const auto& v : p.vulns) {
             if (!eval_constraint(version, v.constraint)) continue;
@@ -187,13 +215,22 @@ std::vector<Finding> CveDb::match(const std::string& host, uint16_t port,
             f.evidence = "product=" + p.product + " version=" +
                          (version.empty() ? "unknown" : version) +
                          " matches " + v.constraint;
+            if (!backport.empty()) {
+                f.evidence += " [" + backport + "]";
+                f.description +=
+                    " The banner names a distribution (" + backport +
+                    "): such packages usually carry the fix while keeping "
+                    "the upstream version string — verify against the "
+                    "package changelog before acting on this finding.";
+            }
             f.cve = v.cve;
             f.source = "cve-db";
-            // Version match only: a potential suspicion until the record's
-            // active check (if any) proves it.
-            f.verified = false;
-            f.confidence = "potential";
             f.check = v.check;
+            // Version match only: a potential suspicion until the record's
+            // active check (if any) proves it. Backported distros lower the
+            // confidence since the upstream version usually ships the fix.
+            f.verified = false;
+            f.confidence = backport.empty() ? "potential" : "low";
             out.push_back(std::move(f));
         }
     }

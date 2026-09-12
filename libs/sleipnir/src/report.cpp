@@ -102,6 +102,9 @@ void print_console_report(const ResultCollector& results,
             if (p.tls)
                 std::cout << "  " << C_DIM << "[" << p.tls->protocol << "]"
                           << C_RESET;
+            if (!p.os_guess.empty())
+                std::cout << "  " << C_DIM << "{" << p.os_guess << "}"
+                          << C_RESET;
             std::cout << "\n";
         } else {
             const char* color =
@@ -189,6 +192,7 @@ bool write_json_report(const std::string& path,
         j["product"] = p.product;
         j["version"] = p.version;
         j["banner"] = p.banner;
+        if (!p.os_guess.empty()) j["os_guess"] = p.os_guess;
         if (p.http_status) {
             j["http"] = {{"status", p.http_status}, {"headers", p.http_headers}};
         }
